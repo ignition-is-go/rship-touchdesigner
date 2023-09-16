@@ -89,6 +89,9 @@
     <ClInclude Include="CPlusPlus_Common.h" />
     <ClInclude Include="RShipCHOP.h" />
   </ItemGroup>
+  <ItemGroup>
+    <None Include="Readme.md" />
+  </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">
   </ImportGroup>
