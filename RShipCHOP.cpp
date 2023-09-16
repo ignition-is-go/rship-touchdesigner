@@ -32,53 +32,53 @@ using easywsclient::WebSocket;
 extern "C"
 {
 
-DLLEXPORT
-void
-FillCHOPPluginInfo(CHOP_PluginInfo *info)
-{
-	// Always set this to CHOPCPlusPlusAPIVersion.
-	info->apiVersion = CHOPCPlusPlusAPIVersion;
+	DLLEXPORT
+		void
+		FillCHOPPluginInfo(CHOP_PluginInfo* info)
+	{
+		// Always set this to CHOPCPlusPlusAPIVersion.
+		info->apiVersion = CHOPCPlusPlusAPIVersion;
 
-	// The opType is the unique name for this CHOP. It must start with a 
-	// capital A-Z character, and all the following characters must lower case
-	// or numbers (a-z, 0-9)
-	info->customOPInfo.opType->setString("Rshipexec");
+		// The opType is the unique name for this CHOP. It must start with a 
+		// capital A-Z character, and all the following characters must lower case
+		// or numbers (a-z, 0-9)
+		info->customOPInfo.opType->setString("Rshipexec");
 
-	// The opLabel is the text that will show up in the OP Create Dialog
-	info->customOPInfo.opLabel->setString("Rship Executor");
+		// The opLabel is the text that will show up in the OP Create Dialog
+		info->customOPInfo.opLabel->setString("Rship Executor");
 
-	// Information about the author of this OP
-	info->customOPInfo.authorName->setString("Trevor Sargent");
-	info->customOPInfo.authorEmail->setString("trevor@lucid.rocks");
+		// Information about the author of this OP
+		info->customOPInfo.authorName->setString("Trevor Sargent");
+		info->customOPInfo.authorEmail->setString("trevor@lucid.rocks");
 
-	// This CHOP can work with 0 inputs
-	info->customOPInfo.minInputs = 0;
+		// This CHOP can work with 0 inputs
+		info->customOPInfo.minInputs = 0;
 
-	// It can accept up to 1 input though, which changes it's behavior
-	info->customOPInfo.maxInputs = 1;
-}
+		// It can accept up to 1 input though, which changes it's behavior
+		info->customOPInfo.maxInputs = 1;
+	}
 
-DLLEXPORT
-CHOP_CPlusPlusBase*
-CreateCHOPInstance(const OP_NodeInfo* info)
-{
-	// Return a new instance of your class every time this is called.
-	// It will be called once per CHOP that is using the .dll
+	DLLEXPORT
+		CHOP_CPlusPlusBase*
+		CreateCHOPInstance(const OP_NodeInfo* info)
+	{
+		// Return a new instance of your class every time this is called.
+		// It will be called once per CHOP that is using the .dll
 
 
 
-	return new RShipCHOP(info);
-}
+		return new RShipCHOP(info);
+	}
 
-DLLEXPORT
-void
-DestroyCHOPInstance(CHOP_CPlusPlusBase* instance)
-{
-	// Delete the instance here, this will be called when
-	// Touch is shutting down, when the CHOP using that instance is deleted, or
-	// if the CHOP loads a different DLL
-	delete (RShipCHOP*)instance;
-}
+	DLLEXPORT
+		void
+		DestroyCHOPInstance(CHOP_CPlusPlusBase* instance)
+	{
+		// Delete the instance here, this will be called when
+		// Touch is shutting down, when the CHOP using that instance is deleted, or
+		// if the CHOP loads a different DLL
+		delete (RShipCHOP*)instance;
+	}
 
 };
 
@@ -133,7 +133,7 @@ RShipCHOP::getOutputInfo(CHOP_OutputInfo* info, const OP_Inputs* inputs, void* r
 }
 
 void
-RShipCHOP::getChannelName(int32_t index, OP_String *name, const OP_Inputs* inputs, void* reserved1)
+RShipCHOP::getChannelName(int32_t index, OP_String* name, const OP_Inputs* inputs, void* reserved1)
 {
 	name->setString("chan1");
 }
@@ -142,17 +142,24 @@ void handle_message(const std::string& message) {
 	printf(message.c_str());
 }
 
+void scrape() {
+	
+}
+
 void
 RShipCHOP::execute(CHOP_Output* output,
-							  const OP_Inputs* inputs,
-							  void* reserved)
+	const OP_Inputs* inputs,
+	void* reserved)
 {
+
+	
+
 	myExecuteCount++;
 
 	int connect = inputs->getParInt("Connect");
-	
+
 	if (connect == 1 && ws == NULL) {
-		
+
 		std::string addr = inputs->getParString("Address");
 		int port = inputs->getParInt("Port");
 		int clientId = 5;
@@ -160,7 +167,6 @@ RShipCHOP::execute(CHOP_Output* output,
 		const std::string url = "ws://" + addr + ":" + std::to_string(port) + "/myko?clientId=" + std::to_string(clientId);
 
 		ws = WebSocket::from_url(url);
-
 
 		return;
 	}
@@ -186,8 +192,6 @@ RShipCHOP::execute(CHOP_Output* output,
 			printf("Socket Closed!\n");
 
 		}
-
-		
 	}
 
 	if (connect == 0 && ws != NULL) {
@@ -196,10 +200,12 @@ RShipCHOP::execute(CHOP_Output* output,
 		delete ws;
 		ws = NULL;
 	}
+
+	
 }
 
 int32_t
-RShipCHOP::getNumInfoCHOPChans(void * reserved1)
+RShipCHOP::getNumInfoCHOPChans(void* reserved1)
 {
 	// We return the number of channel we want to output to any Info CHOP
 	// connected to the CHOP. In this example we are just going to send one channel.
@@ -208,8 +214,8 @@ RShipCHOP::getNumInfoCHOPChans(void * reserved1)
 
 void
 RShipCHOP::getInfoCHOPChan(int32_t index,
-										OP_InfoCHOPChan* chan,
-										void* reserved1)
+	OP_InfoCHOPChan* chan,
+	void* reserved1)
 {
 	// This function will be called once for each channel we said we'd want to return
 	// In this example it'll only be called once.
@@ -226,7 +232,7 @@ RShipCHOP::getInfoCHOPChan(int32_t index,
 	}
 }
 
-bool		
+bool
 RShipCHOP::getInfoDATSize(OP_InfoDATSize* infoSize, void* reserved1)
 {
 	infoSize->rows = 2;
@@ -239,9 +245,9 @@ RShipCHOP::getInfoDATSize(OP_InfoDATSize* infoSize, void* reserved1)
 
 void
 RShipCHOP::getInfoDATEntries(int32_t index,
-										int32_t nEntries,
-										OP_InfoDATEntries* entries, 
-										void* reserved1)
+	int32_t nEntries,
+	OP_InfoDATEntries* entries,
+	void* reserved1)
 {
 	char tempBuffer[4096];
 
@@ -263,12 +269,12 @@ RShipCHOP::getInfoDATEntries(int32_t index,
 	{
 		// Set the value for the first column
 		entries->values[0]->setString("offset");
-		entries->values[1]->setString( tempBuffer);
+		entries->values[1]->setString(tempBuffer);
 	}
 }
 
 void
-RShipCHOP::setupParameters(OP_ParameterManager* manager, void *reserved1)
+RShipCHOP::setupParameters(OP_ParameterManager* manager, void* reserved1)
 {
 	{
 		OP_StringParameter np;
@@ -282,7 +288,7 @@ RShipCHOP::setupParameters(OP_ParameterManager* manager, void *reserved1)
 
 	{
 		OP_NumericParameter np;
-		
+
 		np.name = "Port";
 		np.label = "Port";
 
@@ -306,9 +312,9 @@ RShipCHOP::setupParameters(OP_ParameterManager* manager, void *reserved1)
 
 }
 
-void 
+void
 RShipCHOP::pulsePressed(const char* name, void* reserved1)
 {
-	
+
 }
 
