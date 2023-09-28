@@ -4,6 +4,19 @@ import socket
 from datetime import datetime, timezone
 
 ##################################
+# Helpers
+##################################
+
+def print_dict(d, indent=0):
+	for key, value in d.items():
+		if isinstance(value, dict):
+			print("{}{}:".format(" " * indent, key))
+			print_dict(value, indent + 2)
+		else:
+			print("{}{}: {}".format(" " * indent, key, value))
+
+
+##################################
 # Myko Api
 ##################################
 
@@ -41,10 +54,28 @@ class MWrappedQuery:
 		self.query: MQuery
 		self.tx: str
 
+class WSCommand: 
+	def __init__(self, data: any):
+		self.event = 'ws:m:command'
+		self.data = data
+
+class MCommand: 
+	def __init__(self, tx: str, createdAt: str ):
+		self.tx = tx
+		self.createdAt = createdAt
+
+
+class MWrappedCommand: 
+	def __init__(self, commandId: str, clientId: str, data: MCommand):
+		self.commandId = commandId
+		self.clientId = clientId
+		self.data = data
 
 ##################################
 # Rship Executor API
 ##################################
+
+# Items ##########################
 
 class Target(MItem) :
 	def __init__(self, id: str, name: str, actionIds: [str], emitterIds: [str], subTargets: [str], serviceId: str, bgColor: str, fgColor: str, lastUpdated: str, category: str, rootLevel: bool):
@@ -74,7 +105,7 @@ class TargetStatus(MItem):
 		self.instanceId = instanceId
 
 class Action(MItem): 
-	def __init__(self, id: str, name: str, targetId: str, systemId: str, schema: str =  None):
+	def __init__(self, id: str, name: str, targetId: str, systemId: str, schema: str):
 		super().__init__(id, name)
 
 		self.schema = schema
@@ -139,6 +170,15 @@ class Service(MItem):
 
 		self.systemTypeCode = systemTypeCode
 
+
+# Commands #######################
+
+class ExecTargetAction(MCommand): 
+	def __init__(self, tx: str, createdAt: str, action: Action, data: any):
+		super().__init__(tx, createdAt)
+		self.action = action
+		self.data = data
+
 ##################################
 # Websocket MykoClient
 ##################################
@@ -146,19 +186,43 @@ class Service(MItem):
 # class that handles the cached version of the touch targets, instances, actions, etc for rocketship. 
 class MykoClient:
 	
-	def __init__(self, send):
+	def setSend(self, send):
 		self.send = send
 
 	def log(self, message):
 		print("MykoClient: " + message)
 
 	def sendEvent(self, event: MEvent):
+		if not hasattr(self, 'send'):
+			self.log("Cant send, no socket")
+			return
 		text = json.dumps(WSEvent(event).__dict__)
 		self.send(text)
 
 	def set(self, item: MItem):
 		event = MEvent(changeType=MEventType.SET, item=item)
 		self.sendEvent(event)
+
+	def parseMessage(self, message):
+		d = json.loads(message)
+		if d['event'] == 'ws:m:command':
+			self.parseCommand(d['data'])
+
+	def parseCommand(self, data):
+		if data['commandId'] == 'target:action:exec': 
+			action = actions[data['command']['action']['id']]
+			c = ExecTargetAction(
+				tx=data['command']['tx'], 
+				createdAt=data['command']['createdAt'], 
+				action=action, 
+				data=data['command']['data']
+			)
+			self.handleExecTargetAction(c)
+
+	def handleExecTargetAction(self, command: ExecTargetAction):
+		handler = handlers[command.action.id]
+		handler(command.action, command.data)
+
 
 
 ##################################
@@ -167,11 +231,12 @@ class MykoClient:
 
 # me - this DAT
 # dat - the WebSocket DAT
-client: MykoClient = None
+client = MykoClient()
 targets: dict = {}
 targetStatuses: dict = {}
 actions: dict = {}
 emitters: dict = {}
+handlers: dict = {}
 
 ##################################
 # Touch Designer Exec
@@ -221,9 +286,16 @@ def saveTarget(instance: Instance, operator) -> None:
 			name="Set " + par.name,
 			targetId=parTargetId,
 			systemId=instance.serviceId,
-			schema=setSchema
+			schema=setSchema,
 		)
 
+		def handle(action, data):
+			chunks = action.id.split(":")
+			parName = chunks[1]
+			operator.par[parName] = data['value']
+
+		handlers[setAction.id] = handle
+	
 		valueEmitter = Emitter(
 			id=parTargetId + ":valueUpdated",
 			name=par.name + " Value Updated",
@@ -298,7 +370,7 @@ def saveTarget(instance: Instance, operator) -> None:
 ##################################
 
 def onConnect(dat):
-	client = MykoClient(dat.sendText)
+	client.setSend(dat.sendText)
 	machine = Machine(socket.gethostname())
 	clientId = op('script1')[0, 0].val
 
@@ -342,7 +414,7 @@ def onDisconnect(dat):
 # Only text frame messages will be handled in this function.
 
 def onReceiveText(dat, rowIndex, message):
-	print("onReceiveText", rowIndex, message)
+	client.parseMessage(message)
 	return
 
 def onReceiveBinary(dat, contents):
