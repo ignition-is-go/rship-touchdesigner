@@ -1,7 +1,7 @@
 import json
 from enum import Enum
 import socket
-
+from datetime import datetime, timezone
 
 ##################################
 # Myko Api
@@ -47,7 +47,7 @@ class MWrappedQuery:
 ##################################
 
 class Target(MItem) :
-	def __init__(self, id: str, name: str, actionIds: [str], emitterIds: [str], subTargets: [str], serviceId: str, bgColor: str, fgColor: str, lastUpdated: str):
+	def __init__(self, id: str, name: str, actionIds: [str], emitterIds: [str], subTargets: [str], serviceId: str, bgColor: str, fgColor: str, lastUpdated: str, category: str, rootLevel: bool):
 		super().__init__(id, name)
 
 		self.actionIds = actionIds
@@ -57,6 +57,21 @@ class Target(MItem) :
 		self.bgColor = bgColor
 		self.fgColor = fgColor
 		self.lastUpdated = lastUpdated
+		self.category = category
+		self.rootLevel = rootLevel
+
+class Status(Enum): 
+	Online = 'online'
+	Offline ='offline'
+
+class TargetStatus(MItem): 
+	def __init__(self, id: str, name: str, targetId: str, status: Enum, lastUpdated: str, instanceId: str):
+		super().__init__(id, name)
+
+		self.targetId = targetId
+		self.status = status.value
+		self.lastUpdated = lastUpdated
+		self.instanceId = instanceId
 
 class Action(MItem): 
 	def __init__(self, id: str, name: str, targetId: str, systemId: str, schema: str =  None):
@@ -138,9 +153,7 @@ class MykoClient:
 		print("MykoClient: " + message)
 
 	def sendEvent(self, event: MEvent):
-
 		text = json.dumps(WSEvent(event).__dict__)
-		print("sending event", text)
 		self.send(text)
 
 	def set(self, item: MItem):
@@ -149,16 +162,143 @@ class MykoClient:
 
 
 ##################################
-# Websocket DAT Callbacks
+# Globals
 ##################################
 
 # me - this DAT
 # dat - the WebSocket DAT
 client: MykoClient = None
+targets: dict = {}
+targetStatuses: dict = {}
+actions: dict = {}
+emitters: dict = {}
+
+##################################
+# Touch Designer Exec
+##################################
+
+def scanTargets(instance: Instance): 
+	root = op('/')
+	scanOp(instance, root)
+
+def scanOp(instance: Instance, operator):
+	for child in operator.children:
+		if "rship" in list(child.tags):
+			saveTarget(instance, child)
+		scanOp(instance, child)
+	
+	
+def saveTarget(instance: Instance, operator) -> None:
+
+	parTargets: [Target] = []
+
+
+	# get pars
+	for par in operator.customPars:
+		parTargetId = operator.path + ":" + par.name
+
+		type = "string"
+
+		if par.style == 'Float' or par.style == 'Int':
+			type = "number"
+		elif par.style == 'Toggle':
+			type = "boolean"
+
+		setSchema = {
+			"type": "object",
+			"properties": {
+				"value": {
+					"type": type
+				}
+			},
+			"required": [
+				"value"
+			]
+		}
+
+		setAction = Action(
+			id=parTargetId + ":set",
+			name="Set " + par.name,
+			targetId=parTargetId,
+			systemId=instance.serviceId,
+			schema=setSchema
+		)
+
+		valueEmitter = Emitter(
+			id=parTargetId + ":valueUpdated",
+			name=par.name + " Value Updated",
+			targetId=parTargetId,
+			serviceId=instance.serviceId
+		)
+
+		# make target for each par
+		t = Target(
+			id=parTargetId,
+			name=par.name,
+			actionIds=[setAction.id],
+			emitterIds=[valueEmitter.id],
+			subTargets=[],
+			serviceId=instance.serviceId,
+			category="Parameter",
+			bgColor="#5d6448",
+			fgColor="#5d6448",
+			lastUpdated=datetime.now(timezone.utc).isoformat(),
+			rootLevel=False
+		)
+
+		parTargets.append(t)
+		# save those targets
+		targets[t.id] = t
+		targetStatuses[t.id] = TargetStatus(
+			id=t.id + ":status",
+			name=t.name + " Status",
+			targetId=t.id,
+			instanceId=instance.id,
+			status=Status.Online,
+			lastUpdated=datetime.now(timezone.utc).isoformat()
+		)
+
+		# save actions
+		actions[setAction.id] = setAction
+
+		# save emitters
+		emitters[valueEmitter.id] = valueEmitter
+		
+
+	# include as subtargets of base node
+
+	target = Target(
+		id=operator.path, 
+		name=operator.name, 
+		actionIds=[], 
+		emitterIds=[], 
+		subTargets=list(map(lambda t: t.id, parTargets)),
+		serviceId=instance.serviceId, 
+		category="Base Comp",
+		bgColor="#5d6448", 
+		fgColor="#5d6448", 
+		lastUpdated=datetime.now(timezone.utc).isoformat(),
+		rootLevel=True
+	)
+
+	targets[target.id] = target
+	targetStatuses[target.id] = TargetStatus(
+		id=target.id + ":status",
+		name=target.name + " Status",
+		targetId=target.id,
+		status=Status.Online,
+		instanceId=instance.id,
+		lastUpdated=datetime.now(timezone.utc).isoformat()
+	)
+
+
+
+##################################
+# Websocket DAT Callbacks
+##################################
 
 def onConnect(dat):
 	client = MykoClient(dat.sendText)
-	client.log("connected")
 	machine = Machine(socket.gethostname())
 	clientId = op('script1')[0, 0].val
 
@@ -169,6 +309,21 @@ def onConnect(dat):
 	instance = Instance(id=machine.id+":"+serviceId, name=serviceId, serviceId=serviceId, execId=clientId, serviceTypeCode="touchdesigner", status=InstanceStatus.Available, machineId=machine.id)
 	client.set(machine)
 	client.set(instance)
+
+	scanTargets(instance)
+	
+	for target in targets.values():
+		client.set(target)
+	
+	for targetStatus in targetStatuses.values():
+		client.set(targetStatus)
+
+	for action in actions.values():
+		client.set(action)
+
+	for emitter in emitters.values():
+		client.set(emitter)
+
 	return
 
 # me - this DAT
@@ -190,47 +345,17 @@ def onReceiveText(dat, rowIndex, message):
 	print("onReceiveText", rowIndex, message)
 	return
 
-
-# me - this DAT
-# dat - the DAT that received a message
-# contents - a byte array of the message contents
-# 
-# Only binary frame messages will be handled in this function.
-
 def onReceiveBinary(dat, contents):
-	print("receive binary")
 	return
 
-# me - this DAT
-# dat - the DAT that received a message
-# contents - a byte array of the message contents
-# 
-# Only ping messages will be handled in this function.
-
 def onReceivePing(dat, contents):
-	print("receivePing")
 	dat.sendPong(contents) # send a reply with same message
 	return
 
-# me - this DAT
-# dat - the DAT that received a message
-# contents - a byte array of the message content
-# 
-# Only pong messages will be handled in this function.
 
 def onReceivePong(dat, contents):
-	print("receive pong")
 	return
-
-
-# me - this DAT
-# dat - the DAT that received a message
-# message - a unicode representation of the message
-#
-# Use this method to monitor the websocket status messages
 
 def onMonitorMessage(dat, message):
 	print(message)
 	return
-
-	
