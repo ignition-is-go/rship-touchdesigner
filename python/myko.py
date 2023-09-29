@@ -8,7 +8,6 @@ class MItem:
 	def __init__(self, id: str, name: str):
 		self.id = id
 		self.name = name
-		self.hash = "hash" # somehow make a hash of the object
 
 class MEvent: 
 	def __init__(self, changeType: MEventType, item: MItem):

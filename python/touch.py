@@ -20,13 +20,13 @@ def scanOp(instance: Instance, operator):
 	
 	
 def makeTarget(instance: Instance, operator) -> None:
-
+	targetId = instance.serviceId + ":" + operator.path
 	ops.append(operator)
 	parTargets: [Target] = []
 
 	# get pars
 	for par in operator.customPars:
-		parTargetId = operator.path + ":" + par.name
+		parTargetId = targetId + ":" + par.name
 
 
 		type = "string"
@@ -58,7 +58,7 @@ def makeTarget(instance: Instance, operator) -> None:
 
 		def handle(action, data):
 			chunks = action.id.split(":")
-			parName = chunks[1]
+			parName = chunks[2]
 			operator.par[parName] = data['value']
 
 		client.saveHandler(setAction.id, handle)
@@ -100,7 +100,7 @@ def makeTarget(instance: Instance, operator) -> None:
 	# include as subtargets of base node
 
 	target = Target(
-		id=operator.path, 
+		id=targetId, 
 		name=operator.name, 
 		actionIds=[], 
 		emitterIds=[], 
@@ -124,6 +124,8 @@ def handleConnect(dat):
 def refresh(): 
 	client.log("refreshing")
 
+	op('../../parexec1').cook(force=True)
+
 	machine = makeMachine()
 	instance = makeInstance()
 
@@ -136,10 +138,19 @@ def refresh():
 
 	for target in targets.values():
 		
-		operator = op(target.id)
+		sections = targetId.split(":")
+		opPath = sections[1]
+		operator = op(opPath)
 		if(type(operator) == type(None)):
 			client.setTargetOffline(target, instance)
 	
+	return
+
+def pulseEmitter(opPath: str, parName: str, data: any):
+	instance = makeInstance()
+	emitterId = instance.serviceId + ":" + opPath + ":" + parName + ":valueUpdated"
+	
+	client.pulseEmitter(emitterId=emitterId,data=data)
 	return
 
 def makeMachine() -> Machine: 

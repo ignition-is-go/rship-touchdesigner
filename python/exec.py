@@ -186,6 +186,20 @@ class ExecClient:
 		self.emitters[emitter.id] = emitter
 		self.set(emitter)
 
+	def pulseEmitter(self, emitterId: str, data: any):
+
+		e = self.emitters[emitterId]
+
+		print("Pulse emitter " + e.name)
+
+		p = Pulse(
+			id=emitterId,
+			name="Pulse",
+			emitterId=emitterId,
+			data=data
+		)
+		self.set(p)
+
 	def saveHandler(self, actionId: str, handler: callable):
 		self.handlers[actionId] = handler
 
