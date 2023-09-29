@@ -7,11 +7,11 @@
 
 from touch import refresh
 
-
 def onStart():
 	return
 
 def onCreate():
+	op('..').par.Regenerateclientid.pulse(1)
 	return
 
 def onExit():

@@ -41,11 +41,12 @@ class Action(MItem):
 		self.systemId = systemId
 
 class Emitter(MItem): 
-	def __init__(self, id: str, name: str, targetId: str, serviceId: str):
+	def __init__(self, id: str, name: str, targetId: str, serviceId: str, schema: any):
 		super().__init__(id, name)
 
 		self.targetId = targetId
 		self.serviceId = serviceId
+		self.schema = schema
 
 class Pulse(MItem): 
 	def __init__(self, id: str, name: str, emitterId: str, data: any):
@@ -187,11 +188,6 @@ class ExecClient:
 		self.set(emitter)
 
 	def pulseEmitter(self, emitterId: str, data: any):
-
-		e = self.emitters[emitterId]
-
-		print("Pulse emitter " + e.name)
-
 		p = Pulse(
 			id=emitterId,
 			name="Pulse",

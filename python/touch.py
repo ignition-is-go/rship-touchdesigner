@@ -10,8 +10,6 @@ def scanTargets(instance: Instance):
 	root = op('/')
 	scanOp(instance, root)
 
-	parexec = op("../../parexec1")
-
 def scanOp(instance: Instance, operator):
 	for child in operator.children:
 		if "rship" in list(child.tags):
@@ -36,7 +34,7 @@ def makeTarget(instance: Instance, operator) -> None:
 		elif par.style == 'Toggle':
 			type = "boolean"
 
-		setSchema = {
+		schema = {
 			"type": "object",
 			"properties": {
 				"value": {
@@ -53,7 +51,7 @@ def makeTarget(instance: Instance, operator) -> None:
 			name="Set " + par.name,
 			targetId=parTargetId,
 			systemId=instance.serviceId,
-			schema=setSchema,
+			schema=schema,
 		)
 
 		def handle(action, data):
@@ -67,7 +65,8 @@ def makeTarget(instance: Instance, operator) -> None:
 			id=parTargetId + ":valueUpdated",
 			name=par.name + " Value Updated",
 			targetId=parTargetId,
-			serviceId=instance.serviceId
+			serviceId=instance.serviceId,
+			schema=schema
 		)
 
 		# make target for each par
@@ -99,10 +98,25 @@ def makeTarget(instance: Instance, operator) -> None:
 
 	# include as subtargets of base node
 
+	disableAction = Action(id=targetId+":disable", name="Disable", targetId=targetId, systemId=instance.serviceId, schema=None)
+	enableAction = Action(id=targetId+":enable", name="Enable", targetId=targetId, systemId=instance.serviceId, schema=None)
+
+	def handleDisable(action, data):
+		operator.allowCooking = False
+
+	def handleEnable(action, data):
+		operator.allowCooking = True
+
+	client.saveHandler(disableAction.id, handleDisable)
+	client.saveHandler(enableAction.id, handleEnable)
+
+	client.saveAction(enableAction)
+	client.saveAction(disableAction)
+
 	target = Target(
 		id=targetId, 
 		name=operator.name, 
-		actionIds=[], 
+		actionIds=[enableAction.id, disableAction.id], 
 		emitterIds=[], 
 		subTargets=list(map(lambda t: t.id, parTargets)),
 		serviceId=instance.serviceId, 
@@ -118,13 +132,14 @@ def makeTarget(instance: Instance, operator) -> None:
 
 def handleConnect(dat):
 	client.setSend(dat.sendText)
+	op('../../..').par.Connected = True
 	refresh()
 	return
 
 def refresh(): 
 	client.log("refreshing")
 
-	op('../../parexec1').cook(force=True)
+	op('../../emitters').cook(force=True)
 
 	machine = makeMachine()
 	instance = makeInstance()
@@ -138,7 +153,7 @@ def refresh():
 
 	for target in targets.values():
 		
-		sections = targetId.split(":")
+		sections = target.id.split(":")
 		opPath = sections[1]
 		operator = op(opPath)
 		if(type(operator) == type(None)):
@@ -150,7 +165,7 @@ def pulseEmitter(opPath: str, parName: str, data: any):
 	instance = makeInstance()
 	emitterId = instance.serviceId + ":" + opPath + ":" + parName + ":valueUpdated"
 	
-	client.pulseEmitter(emitterId=emitterId,data=data)
+	client.pulseEmitter(emitterId=emitterId,data={'value': data})
 	return
 
 def makeMachine() -> Machine: 
@@ -164,7 +179,7 @@ def makeInstance() -> Instance:
 	machine = makeMachine() 
 	
 	serviceId = sections[0]
-	clientId = op('../../script1')[0, 0].val
+	clientId = op('../../..').par.Clientid.eval()
 
 	instance = Instance(id=machine.id+":"+serviceId, name=serviceId, serviceId=serviceId, execId=clientId, serviceTypeCode="touchdesigner", status=InstanceStatus.Available, machineId=machine.id)
 	return instance
@@ -173,4 +188,5 @@ def handleMessage(dat, message):
 	client.parseMessage(message)
 
 def handleDisconnect(dat): 
+	op('../../..').par.Connected = False
 	client.log("disconnected")
