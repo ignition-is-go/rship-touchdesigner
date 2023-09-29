@@ -149,8 +149,10 @@ def makeMachine() -> Machine:
 def makeInstance() -> Instance:
 	projectfile = project.name
 	sections = projectfile.split(".")
+	
 	machine = makeMachine() 
-	serviceId = ".".join(sections[:-2])
+	
+	serviceId = sections[0]
 	clientId = op('../../script1')[0, 0].val
 
 	instance = Instance(id=machine.id+":"+serviceId, name=serviceId, serviceId=serviceId, execId=clientId, serviceTypeCode="touchdesigner", status=InstanceStatus.Available, machineId=machine.id)
