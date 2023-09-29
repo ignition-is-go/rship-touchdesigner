@@ -20,7 +20,11 @@ def onValuesChanged(changes):
 	return
 
 def onPulse(par):
-	op('../../..').par.Clientid = uuid4()
+	if par.name == "Regenerateclientid":
+		op('../../..').par.Clientid = uuid4()
+	if par.name == "Clearclientid":
+		op('../../..').par.Clientid = None
+		op('../../..').par.Address = None
 	return
 
 def onExpressionChange(par, val, prev):

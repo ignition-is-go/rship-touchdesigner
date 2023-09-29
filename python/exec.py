@@ -71,7 +71,7 @@ class InstanceStatus(Enum):
 
 
 class Instance(MItem): 
-	def __init__(self, id: str, name: str, serviceId: str, execId: str, serviceTypeCode: str, status: InstanceStatus, machineId: str):
+	def __init__(self, id: str, name: str, serviceId: str, execId: str, serviceTypeCode: str, status: InstanceStatus, machineId: str, color: str):
 		super().__init__(id, name)
 		
 		self.serviceId = serviceId
@@ -79,6 +79,7 @@ class Instance(MItem):
 		self.serviceTypeCode = serviceTypeCode
 		self.status = status.value
 		self.machineId = machineId
+		self.color = color
 
 class Machine(MItem):
 	name: str

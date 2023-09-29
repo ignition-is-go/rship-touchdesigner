@@ -78,8 +78,8 @@ def makeTarget(instance: Instance, operator) -> None:
 			subTargets=[],
 			serviceId=instance.serviceId,
 			category="Parameter",
-			bgColor="#5d6448",
-			fgColor="#5d6448",
+			bgColor="#727e51",
+			fgColor="#727e51",
 			lastUpdated=datetime.now(timezone.utc).isoformat(),
 			rootLevel=False
 		)
@@ -121,8 +121,8 @@ def makeTarget(instance: Instance, operator) -> None:
 		subTargets=list(map(lambda t: t.id, parTargets)),
 		serviceId=instance.serviceId, 
 		category="Base Comp",
-		bgColor="#5d6448", 
-		fgColor="#5d6448", 
+		bgColor="#727e51", 
+		fgColor="#727e51", 
 		lastUpdated=datetime.now(timezone.utc).isoformat(),
 		rootLevel=True
 	)
@@ -181,7 +181,15 @@ def makeInstance() -> Instance:
 	serviceId = sections[0]
 	clientId = op('../../..').par.Clientid.eval()
 
-	instance = Instance(id=machine.id+":"+serviceId, name=serviceId, serviceId=serviceId, execId=clientId, serviceTypeCode="touchdesigner", status=InstanceStatus.Available, machineId=machine.id)
+	instance = Instance(
+		id=machine.id+":"+serviceId, 
+		name=serviceId, 
+		serviceId=serviceId, 
+		execId=clientId, 
+		serviceTypeCode="touchdesigner", 
+		status=InstanceStatus.Available, 
+		machineId=machine.id, color="#727e51"
+	)
 	return instance
 
 def handleMessage(dat, message):
