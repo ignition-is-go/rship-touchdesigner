@@ -6,12 +6,12 @@
 # Make sure the corresponding toggle is enabled in the Execute DAT.
 
 from touch import refresh
+from registry import client
 
 def onStart():
 	return
 
 def onCreate():
-	op('..').par.Regenerateclientid.pulse(1)
 	return
 
 def onExit():
@@ -33,7 +33,8 @@ def onProjectPreSave():
 	return
 
 def onProjectPostSave():
-	refresh()
+	if(client.clientId):
+		refresh(client.clientId)
 	return
 
 	

@@ -120,10 +120,14 @@ class ExecClient:
 		self.actions: Dict[str, Action] = {}
 		self.emitters: Dict[str, Emitter] = {}
 		self.handlers: Dict[str, callable] = {}
+		self.clientId: str = None
 
 	
 	def setSend(self, send):
 		self.send = send
+
+	def onExecConnected(self, func): 
+		self.onExecConnectedCallback: callable = func
 
 	def log(self, message):
 		print("MykoClient: " + message)
@@ -154,6 +158,11 @@ class ExecClient:
 				data=data['command']['data']
 			)
 			self.handleExecTargetAction(c)
+
+		if data['commandId'] == 'client:setId': 
+			self.clientId = data['command']['clientId']
+			if(self.onExecConnectedCallback):
+				self.onExecConnectedCallback(self.clientId)
 
 	def handleExecTargetAction(self, command: ExecTargetAction):
 		handler = self.handlers[command.action.id]

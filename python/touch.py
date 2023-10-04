@@ -5,6 +5,8 @@ from datetime import datetime, timezone
 
 ops = []
 
+client.onExecConnected(lambda clientId: refresh(clientId))
+
 def scanTargets(instance: Instance): 
 	ops.clear()
 	root = op('/')
@@ -133,16 +135,16 @@ def makeTarget(instance: Instance, operator) -> None:
 def handleConnect(dat):
 	client.setSend(dat.sendText)
 	op('../../..').par.Connected = True
-	refresh()
 	return
 
-def refresh(): 
+def refresh(clientId: str): 
 	client.log("refreshing")
 
 	op('../../emitters').cook(force=True)
+	op('../../..').par.Clientid = clientId
 
 	machine = makeMachine()
-	instance = makeInstance()
+	instance = makeInstance(clientId)
 
 	client.set(machine)
 	client.set(instance)
@@ -172,14 +174,13 @@ def makeMachine() -> Machine:
 	machine = Machine(socket.gethostname())
 	return machine
 
-def makeInstance() -> Instance:
+def makeInstance(clientId: str) -> Instance:
 	projectfile = project.name
 	sections = projectfile.split(".")
 	
 	machine = makeMachine() 
 	
 	serviceId = sections[0]
-	clientId = op('../../..').par.Clientid.eval()
 
 	instance = Instance(
 		id=machine.id+":"+serviceId, 
