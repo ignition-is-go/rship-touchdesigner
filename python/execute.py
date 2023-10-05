@@ -34,7 +34,7 @@ def onProjectPreSave():
 
 def onProjectPostSave():
 	if(client.clientId):
-		refresh(client.clientId)
+		refresh()
 	return
 
 	

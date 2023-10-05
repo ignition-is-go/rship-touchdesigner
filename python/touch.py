@@ -5,7 +5,6 @@ from datetime import datetime, timezone
 
 ops = []
 
-client.onExecConnected(lambda clientId: refresh(clientId))
 
 def scanTargets(instance: Instance): 
 	ops.clear()
@@ -135,16 +134,22 @@ def makeTarget(instance: Instance, operator) -> None:
 def handleConnect(dat):
 	client.setSend(dat.sendText)
 	op('../../..').par.Connected = True
+	client.onExecConnected(refresh)
 	return
 
-def refresh(clientId: str): 
+def refresh(): 
+	
+	if not hasattr(client, 'clientId'):
+		print("skipping refresh, no clientId")
+		return
 	client.log("refreshing")
 
+
 	op('../../emitters').cook(force=True)
-	op('../../..').par.Clientid = clientId
+	op('../../..').par.Clientid = client.clientId
 
 	machine = makeMachine()
-	instance = makeInstance(clientId)
+	instance = makeInstance(client.clientId)
 
 	client.set(machine)
 	client.set(instance)
@@ -164,7 +169,11 @@ def refresh(clientId: str):
 	return
 
 def pulseEmitter(opPath: str, parName: str, data: any):
-	instance = makeInstance()
+	if(client.clientId == None):
+		client.log("Cant pulse emitter without clientid")
+		return
+
+	instance = makeInstance(client.clientId)
 	emitterId = instance.serviceId + ":" + opPath + ":" + parName + ":valueUpdated"
 	
 	client.pulseEmitter(emitterId=emitterId,data={'value': data})
@@ -199,3 +208,4 @@ def handleMessage(dat, message):
 def handleDisconnect(dat): 
 	op('../../..').par.Connected = False
 	client.log("disconnected")
+

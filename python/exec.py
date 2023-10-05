@@ -128,9 +128,10 @@ class ExecClient:
 
 	def onExecConnected(self, func): 
 		self.onExecConnectedCallback: callable = func
+		func()
 
 	def log(self, message):
-		print("MykoClient: " + message)
+		print("RshipClient: " + message)
 
 	def sendEvent(self, event: MEvent):
 		if not hasattr(self, 'send'):
@@ -161,8 +162,10 @@ class ExecClient:
 
 		if data['commandId'] == 'client:setId': 
 			self.clientId = data['command']['clientId']
-			if(self.onExecConnectedCallback):
-				self.onExecConnectedCallback(self.clientId)
+			self.log("Setting ID: " +  self.clientId)
+			if hasattr(self, 'onExecConnectedCallback'):
+				self.onExecConnectedCallback()
+
 
 	def handleExecTargetAction(self, command: ExecTargetAction):
 		handler = self.handlers[command.action.id]
