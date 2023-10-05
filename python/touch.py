@@ -195,7 +195,7 @@ def makeInstance(clientId: str) -> Instance:
 		id=machine.id+":"+serviceId, 
 		name=serviceId, 
 		serviceId=serviceId, 
-		execId=clientId, 
+		clientId=clientId, 
 		serviceTypeCode="touchdesigner", 
 		status=InstanceStatus.Available, 
 		machineId=machine.id, color="#727e51"

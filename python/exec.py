@@ -55,13 +55,6 @@ class Pulse(MItem):
 		self.emitterId = emitterId
 		self.data = data
 
-class Exec(MItem): 
-
-	def __init__(self, id: str, name: str, machineId: str):
-		super().__init__(id, name)
-
-		self.machineId = machineId
-
 class InstanceStatus(Enum):
 	Starting = 'Starting'
 	Available = 'Available'
@@ -71,11 +64,11 @@ class InstanceStatus(Enum):
 
 
 class Instance(MItem): 
-	def __init__(self, id: str, name: str, serviceId: str, execId: str, serviceTypeCode: str, status: InstanceStatus, machineId: str, color: str):
+	def __init__(self, id: str, name: str, serviceId: str, clientId: str, serviceTypeCode: str, status: InstanceStatus, machineId: str, color: str):
 		super().__init__(id, name)
 		
 		self.serviceId = serviceId
-		self.execId = execId
+		self.clientId = clientId
 		self.serviceTypeCode = serviceTypeCode
 		self.status = status.value
 		self.machineId = machineId
