@@ -51,7 +51,7 @@ def makeTarget(instance: Instance, operator) -> None:
 			id=parTargetId + ":set",
 			name="Set " + par.name,
 			targetId=parTargetId,
-			systemId=instance.serviceId,
+			serviceId=instance.serviceId,
 			schema=schema,
 		)
 
@@ -99,8 +99,8 @@ def makeTarget(instance: Instance, operator) -> None:
 
 	# include as subtargets of base node
 
-	disableAction = Action(id=targetId+":disable", name="Disable", targetId=targetId, systemId=instance.serviceId, schema=None)
-	enableAction = Action(id=targetId+":enable", name="Enable", targetId=targetId, systemId=instance.serviceId, schema=None)
+	disableAction = Action(id=targetId+":disable", name="Disable", targetId=targetId, serviceId=instance.serviceId, schema=None)
+	enableAction = Action(id=targetId+":enable", name="Enable", targetId=targetId, serviceId=instance.serviceId, schema=None)
 
 	def handleDisable(action, data):
 		operator.allowCooking = False

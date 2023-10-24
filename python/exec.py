@@ -33,12 +33,12 @@ class TargetStatus(MItem):
 		self.instanceId = instanceId
 
 class Action(MItem): 
-	def __init__(self, id: str, name: str, targetId: str, systemId: str, schema: str):
+	def __init__(self, id: str, name: str, targetId: str, serviceId: str, schema: str):
 		super().__init__(id, name)
 
 		self.schema = schema
 		self.targetId = targetId
-		self.systemId = systemId
+		self.serviceId = serviceId
 
 class Emitter(MItem): 
 	def __init__(self, id: str, name: str, targetId: str, serviceId: str, schema: any):
