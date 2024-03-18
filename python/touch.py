@@ -17,87 +17,133 @@ def scanOp(instance: Instance, operator):
 			makeTarget(instance, child)
 		scanOp(instance, child)
 	
+def makeParTarget(instance: Instance, operator, par, parentId) -> None:
+	parTargetId = parentId + ":" + par.name
+	type = "string"
+
+	if par.style == 'Float' or par.style == 'Int':
+		type = "number"
+	elif par.style == 'Toggle':
+		type = "boolean"
+
+	schema = {
+		"type": "object",
+		"properties": {
+			"value": {
+				"type": type
+			}
+		},
+		"required": [
+			"value"
+		]
+	}
+
+	setAction = Action(
+		id=parTargetId + ":set",
+		name="Set " + par.label,
+		targetId=parTargetId,
+		serviceId=instance.serviceId,
+		schema=schema,
+	)
+
+	def handle(action, data):
+		chunks = action.id.split(":")
+		parName = chunks[2]
+		if 'value' in data.keys():
+			operator.par[parName] = data['value']
+		else: 
+			operator.par[parName].pulse()
+
+	client.saveHandler(setAction.id, handle)
+
+	valueEmitter = Emitter(
+		id=parTargetId + ":valueUpdated",
+		name=par.label + " Value Updated",
+		targetId=parTargetId,
+		serviceId=instance.serviceId,
+		schema=schema
+	)
+
+	clarification = ""
+	if par.name.lower() != par.label.replace(" ", "").lower():
+		clarification = " (" + par.name + ")"
+
+	# make target for each par
+	t = Target(
+		id=parTargetId,
+		name=par.label + clarification,
+		actionIds=[setAction.id],
+		emitterIds=[valueEmitter.id],
+		parentTargets=[parentId],
+		serviceId=instance.serviceId,
+		category="Parameter",
+		bgColor="#727e51",
+		fgColor="#727e51",
+		lastUpdated=datetime.now(timezone.utc).isoformat(),
+		rootLevel=False
+	)
+
+	# save those targets
+	client.saveTarget(t)
+	client.setTargetStatus(t, instance, Status.Online)
+
+	# save actions
+
+	client.saveAction(setAction)
+
+	# save emitters
+	client.saveEmitter(valueEmitter)
+
+def makePageTarget(instance: Instance, operator, page, parentId) -> None:
+	pageTargetId = instance.serviceId + ":" + operator.path + ":" + page.name
+
+	# make target for each page
+	t = Target(
+		id=pageTargetId,
+		name=page.name,
+		actionIds=[],
+		emitterIds=[],
+		parentTargets=[parentId],
+		serviceId=instance.serviceId,
+		category="Page",
+		bgColor="#727e51",
+		fgColor="#727e51",
+		lastUpdated=datetime.now(timezone.utc).isoformat(),
+		rootLevel=False
+	)
+
+	# save those targets
+	client.saveTarget(t)
+	client.setTargetStatus(t, instance, Status.Online)
+
+	for par in page.pars:
+		makeParTarget(instance, operator, par, pageTargetId)
 	
 def makeTarget(instance: Instance, operator) -> None:
+
 	targetId = instance.serviceId + ":" + operator.path
 	ops.append(operator)
-	parTargets: [Target] = []
 
 	# get pars
 	for par in operator.customPars:
-		parTargetId = targetId + ":" + par.name
+		makeParTarget(instance, operator, par, targetId)
 
+	# has page named notch
+	hasPageNamedNotch = False
 
-		type = "string"
+	for page in operator.pages: 
+		if page.name == "Notch":
+			hasPageNamedNotch = True
+			for par in page.pars:
+				makeParTarget(instance, operator, par, targetId)
+		if page.name == "Common":
+			continue
 
-		if par.style == 'Float' or par.style == 'Int':
-			type = "number"
-		elif par.style == 'Toggle':
-			type = "boolean"
+		if not hasPageNamedNotch:
+			continue
+		
+		makePageTarget(instance, operator, page, targetId)
 
-		schema = {
-			"type": "object",
-			"properties": {
-				"value": {
-					"type": type
-				}
-			},
-			"required": [
-				"value"
-			]
-		}
-
-		setAction = Action(
-			id=parTargetId + ":set",
-			name="Set " + par.name,
-			targetId=parTargetId,
-			serviceId=instance.serviceId,
-			schema=schema,
-		)
-
-		def handle(action, data):
-			chunks = action.id.split(":")
-			parName = chunks[2]
-			operator.par[parName] = data['value']
-
-		client.saveHandler(setAction.id, handle)
-	
-		valueEmitter = Emitter(
-			id=parTargetId + ":valueUpdated",
-			name=par.name + " Value Updated",
-			targetId=parTargetId,
-			serviceId=instance.serviceId,
-			schema=schema
-		)
-
-		# make target for each par
-		t = Target(
-			id=parTargetId,
-			name=par.name,
-			actionIds=[setAction.id],
-			emitterIds=[valueEmitter.id],
-			subTargets=[],
-			serviceId=instance.serviceId,
-			category="Parameter",
-			bgColor="#727e51",
-			fgColor="#727e51",
-			lastUpdated=datetime.now(timezone.utc).isoformat(),
-			rootLevel=False
-		)
-
-		parTargets.append(t)
-		# save those targets
-		client.saveTarget(t)
-		client.setTargetStatus(t, instance, Status.Online)
-
-		# save actions
-
-		client.saveAction(setAction)
-
-		# save emitters
-		client.saveEmitter(valueEmitter)		
-
-	# include as subtargets of base node
 
 	disableAction = Action(id=targetId+":disable", name="Disable", targetId=targetId, serviceId=instance.serviceId, schema=None)
 	enableAction = Action(id=targetId+":enable", name="Enable", targetId=targetId, serviceId=instance.serviceId, schema=None)
@@ -119,7 +165,7 @@ def makeTarget(instance: Instance, operator) -> None:
 		name=operator.name, 
 		actionIds=[enableAction.id, disableAction.id], 
 		emitterIds=[], 
-		subTargets=list(map(lambda t: t.id, parTargets)),
+		parentTargets=[],
 		serviceId=instance.serviceId, 
 		category="Base Comp",
 		bgColor="#727e51", 
