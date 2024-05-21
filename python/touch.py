@@ -25,6 +25,8 @@ def makeParTarget(instance: Instance, operator, par, parentId) -> None:
 		type = "number"
 	elif par.style == 'Toggle':
 		type = "boolean"
+	elif par.style == 'Pulse':
+		type = "null"
 
 	schema = {
 		"type": "object",
@@ -188,7 +190,7 @@ def refresh():
 	if not hasattr(client, 'clientId'):
 		print("skipping refresh, no clientId")
 		return
-	client.log("refreshing")
+	client.log("refreshing...")
 
 
 	op('../../emitters').cook(force=True)
@@ -211,6 +213,12 @@ def refresh():
 		operator = op(opPath)
 		if(type(operator) == type(None)):
 			client.setTargetOffline(target, instance)
+		else:
+			if len(sections) > 2:
+				parName = sections[-1]
+				if not hasattr(operator.par, parName):
+					client.setTargetOffline(target, instance)
+
 	
 	return
 
