@@ -1,40 +1,59 @@
 # Rship-TouchDesigner
 
-The TouchDesigner Executor integrates naturally and easily with Rocketship. Simply load the rship .tox into any TouchDesigner network to eastablish a connection with Rocketship, tag the Base COMPs whose parameters you wish to expose with 'rship', and their custom paramaters will appear as Targets in the rship GUI with Emitters and Actions to observe/set each parameter's values.
+Rocketship integrates naturally with TouchDesigner. Simply load the rship .tox into any TouchDesigner network to eastablish a connection with Rocketship, tag the Base COMPs whose parameters you wish to expose with 'rship', and their custom paramaters will appear as Targets in the rship GUI with Emitters and Actions that observe/set each parameter's value. 
 
-The Base COMP itself is also a Target and can be activated/deactivated with an Action.
+The Base COMP itself is also a Target with an Action to activate/deactivate (turn cooking on/off).
 
-Notch TOPs can also be tagged 'rship' to expose the parameters of the Notch page, as well as the parameter pages of every layer of the Notch block.
+Rocketship has first-class support for Notch TOPs, which can also be tagged 'rship' to expose the parameters of the 'Notch' page, as well as the 'Parameters' page of each Notch layer in the block.
 
-## Installation
+## Installation and Setup
 
-> 1. Download the rship.tox
-> 2. Import the rship.tox into your TouchDesigner project
+1. Download the rship.tox
+2. Import the rship.tox into a TouchDesigner project
+3. In the rship.tox, enter the address of a Rocketship Server
 
 ## Usage
 
-> 1. Add an 'rship' tag to every Base COMP you wish to expose to Rocketship as a Target.
-> 2. Custom parameters of tagged Base COMPs will appear in Rocketship as Targets.
-> 3. Bind any parameter in the network to a custom parameter on a tagged Base COMP
->    1. Right-click on an 'rship'-labeled BaseCOMP and choose 'Customize Component'
->    2. Enter a 'Par Name' and choose the parameter's data type and number of values
->    3. Identify the parameter in your TouchDesigner patch you wish to expose to Rocketship
->       1. Right-click on the parameter and click 'Copy Parameter'
->       2. Navigate back to the tagged Base COMP, right-click on the custom parameter, and select 'Paste Bind'
-> 4. Save the project
-> 5. Verify that the custom parameter appears in the Rocketship GUI as a Target
-> 6. To export the output of a node to a custom parameter, drag the node onto the parameter name and select 'Export'
+1. Add an 'rship' tag to any Base COMP
+    1. Pulse 'Reconnect' on the rship.tox and verify the COMP appears in the Rocketship GUI as a Target
+2. Add the rship_buddy.tox container as a child component anywhere inside the rhsip-tagged Base COMP
+    1. Activate the rship_buddy node (click the plus button in the bottom-right corner of the node)
+3. Drag and drop parameters onto the rship_buddy
+    1. Click on the name of the parameter to reveal the parameter's details, then middle-click and drag from the parameter's lower-case ID onto the rship_buddy
+    2. Verify a new custom parameter is created on the rship-tagged Base COMP, on the corresponding Rship_Buddy parameter page
+        1. Each instance of the RshipBuddy.tox is associated with a custom parameter page by the name of its parent
+    3. Verify the original parameter is bound to the new custom parameter
+4. Pulse 'Reconnect' on the rship.tox or save the .toe and verify the parameter appears in the Rocketship GUI as a Target
 
-> NOTE: If Targets do not appear immediately in Rocketship, navigate to the rship.tox and pulse Reconnect.
+> NOTE: As of 2024/05/17 Rship-Touchdesigner currently supports float, int, bool, string, and pulse types. Additional types (RGB, XYZ, etc.) can be added upon request.
+
+## Usage: Notch TOPs
+
+1. Add an 'rship' tag to any Notch TOP
+2. Pulse 'Reconnect' on the rship.tox or save the .toe and verify the parameter appears in the Rocketship GUI as a Target
+
+> NOTE: When tagging a new OP 'rship', or adding a new custom parameter to a tagged Base COMP, you must pulse 'Reconnect' or save the .toe in order to register it. 
 
 ## Targets, Actions, and Emitters
 
-| Targets          | Emitters                    | Actions                 |
-| ---------------- | --------------------------- | ----------------------- |
-| **Base COMPs**   |                             | - Activate cooking      |
-|                  |                             | - Deactivate cooking    |
-|                  | - Publish custom par values | - Set custom par values |
-| **Notch TOPs**   |                             | - Activate cooking      |
-|                  |                             | - Deactivate cooking    |
-|                  | - Publish Notch par values  | - Set Notch par values  |
-| **Notch Layers** | - Publish layer par values  | - Set layer par values  |
+- Targets: Base COMPs
+  - Emitters:
+    - Publish custom par values
+  - Actions:
+    - Activate cooking
+    - Deactivate cooking
+    - Set custom par values
+
+- Targets: Notch TOPs
+  - Emitters:
+    - Publish Notch par values
+  - Actions:
+    - Activate cooking
+    - Deactivate cooking
+    - Set Notch par values
+
+- Targets: Notch Layers
+  - Emitters:
+    - Publish layer par values
+  - Actions:
+    - Set layer par values
