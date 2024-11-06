@@ -1,38 +1,45 @@
 # Rship-TouchDesigner
 
-Rocketship integrates naturally with TouchDesigner. Simply load the rship .tox into any TouchDesigner network to eastablish a connection with Rocketship, tag the Base COMPs whose parameters you wish to expose with 'rship', and their custom paramaters will appear as Targets in the rship GUI with Emitters and Actions that observe/set each parameter's value. 
+The TouchDesigner executor for Rocketship. Establishes a connection with a Rocketship server, scans the network for tagged Base COMPs and exposes their custom parameters to rship as targets.
 
-The Base COMP itself is also a Target with an Action to activate/deactivate (turn cooking on/off).
+A buddy .tox is also included, which makes it easier to turn existing parameters in the network into rship targets.
 
-Rocketship has first-class support for Notch TOPs, which can also be tagged 'rship' to expose the parameters of the 'Notch' page, as well as the 'Parameters' page of each Notch layer in the block.
+Notch TOPs have first-class support. Similar to Base COMPs they can be tagged 'rship' to expose the parameters of the 'Notch' page, as well as the 'Parameters' page for each layer in the block.
 
-## Installation and Setup
+## Installation
 
-1. Download the rship.tox
-2. Import the rship.tox into a TouchDesigner project
-3. In the rship.tox, enter the address of a Rocketship Server
+1. Download the rship.tox and rship_buddy.tox
+2. Import the toxes into any TouchDesigner network
 
-## Usage
+## Setup
 
-1. Add an 'rship' tag to any Base COMP
-    1. Pulse 'Reconnect' on the rship.tox and verify the COMP appears in the Rocketship GUI as a Target
-2. Add the rship_buddy.tox container as a child component anywhere inside the rhsip-tagged Base COMP
-    1. Activate the rship_buddy node (click the plus button in the bottom-right corner of the node)
-3. Drag and drop parameters onto the rship_buddy
-    1. Click on the name of the parameter to reveal the parameter's details, then middle-click and drag from the parameter's lower-case ID onto the rship_buddy
-    2. Verify a new custom parameter is created on the rship-tagged Base COMP, on the corresponding Rship_Buddy parameter page
-        1. Each instance of the RshipBuddy.tox is associated with a custom parameter page by the name of its parent
-    3. Verify the original parameter is bound to the new custom parameter
-4. Pulse 'Reconnect' on the rship.tox or save the .toe and verify the parameter appears in the Rocketship GUI as a Target
+1. Drag the rship.tox into a network
+> NOTE: When scanning the network for targets, the rship.tox recursively scans the directory it is in and all subdirectories. We recommend placing the rship.tox in the root of the network in order to be sure that the entire network is scanned, as well as to avoid cluttering the screen with grey reference lines.
+2. In the rship.tox parameters page, enter the address and port of a Rocketship server
+3. Save the project
+4. Verify the TouchDesigner instance appears in the rship GUI, and activate the instance
+5. Add a tag to a Base COMP and name the tag 'rship' (using the small pencil icon in the parameters window)
+6. Save the project
+7. Verify the COMP appears as a target in the rship GUI
+> NOTE: If the Base COMP is renamed, it will automatically track through to the rship GUI
+8. Add parameters to the Base COMP and bind them to other parameters in the network, manually or by using the buddy
 
-> NOTE: As of 2024/05/17 Rship-Touchdesigner currently supports float, int, bool, string, and pulse types. Additional types (RGB, XYZ, etc.) can be added upon request.
+## Using the Buddy
 
-## Usage: Notch TOPs
+1. Drag the rship_buddy.tox anywehere into the network (wherever you would like to quickly expose parameters)
+2. Activate the OP (using the small plus symbol in the bottom-right corner)
+3. Select an OP and drag one of its parameters onto the rship_buddy
+> NOTE: When a parameter is dropped onto the rship_buddy, it recursively scans parent directories until it finds a Base COMP tagged 'rship', creates a custom parameter page (named the source OP) and parameter (named the source parameter), and binds the source parameter to the custom parameter. 
+4. Save the project
+5. Verify the parameter appears as a target in the rship GUI
+> NOTE: Because TouchDesigner uses network paths for binding parameters, renaming a source OP will cause the bindings to break and the Base COMP will error.
+> NOTE: As of 2024/05/17 Rship-Touchdesigner currently supports float, int, bool, string, and pulse types. Support for other types (RGB, XYZ, enum, etc.) may be added as necessary.
+
+## Using Notch TOPs
 
 1. Add an 'rship' tag to any Notch TOP
-2. Pulse 'Reconnect' on the rship.tox or save the .toe and verify the parameter appears in the Rocketship GUI as a Target
-
-> NOTE: When tagging a new OP 'rship', or adding a new custom parameter to a tagged Base COMP, you must pulse 'Reconnect' or save the .toe in order to register it. 
+2. Save the project
+3. Verify the Notch layers and their parameters appear in the rship GUI as targets
 
 ## Targets, Actions, and Emitters
 
