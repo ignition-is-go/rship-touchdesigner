@@ -6,14 +6,9 @@ A buddy .tox is also included, which makes it easier to turn existing parameters
 
 Notch TOPs have first-class support. Similar to Base COMPs they can be tagged 'rship' to expose the parameters of the 'Notch' page, as well as the 'Parameters' page for each layer in the block.
 
-## Installation
-
-1. Download the rship.tox and rship_buddy.tox
-2. Import the toxes into any TouchDesigner network
-
 ## Setup
 
-1. Drag the rship.tox into a network
+1. Download the rship.tox and drag it into a network
 > NOTE: When scanning the network for targets, the rship.tox recursively scans the directory it is in and all subdirectories. We recommend placing the rship.tox in the root of the network in order to be sure that the entire network is scanned, as well as to avoid cluttering the screen with grey reference lines.
 2. In the rship.tox parameters page, enter the address and port of a Rocketship server
 3. Save the project
@@ -26,7 +21,7 @@ Notch TOPs have first-class support. Similar to Base COMPs they can be tagged 'r
 
 ## Using the Buddy
 
-1. Drag the rship_buddy.tox anywehere into the network (wherever you would like to quickly expose parameters)
+1. Download the rship_buddy.tox and drag it into the network (wherever you would like to quickly expose parameters)
 2. Activate the OP (using the small plus symbol in the bottom-right corner)
 3. Select an OP and drag one of its parameters onto the rship_buddy
 > NOTE: When a parameter is dropped onto the rship_buddy, it recursively scans parent directories until it finds a Base COMP tagged 'rship', creates a custom parameter page (named the source OP) and parameter (named the source parameter), and binds the source parameter to the custom parameter. 
