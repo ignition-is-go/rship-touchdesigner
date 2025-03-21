@@ -2,8 +2,6 @@
 
 The TouchDesigner executor for Rocketship. Establishes a connection with a Rocketship server, scans the network for Base COMPs with an 'rship' tag, and exposes their custom parameters to rship as targets.
 
-An rship_buddy tox is also included, which makes it easier to expose existing parameters in the network to rship as targets.
-
 Notch TOPs also have first-class support. Similar to Base COMPs their parameters can be quickly turned into targets by tagging the Notch TOP 'rship'
 
 ## Setup
@@ -17,20 +15,16 @@ Notch TOPs also have first-class support. Similar to Base COMPs their parameters
 6. Save the project
 7. Verify the COMP appears as a target in the rship GUI
 > NOTE: If the Base COMP is renamed, it will automatically track through to the rship GUI
-8. Add a parameter to the Base COMP and bind it to another parameter in the network, manually or by using the buddy
-9. Save the project
-10. Verify the parameter appears in the rship GUI as a target
 
-## Using the Buddy
+## Exposing Parameters
 
-1. Download the rship_buddy.tox and drag it into the network (wherever you would like to quickly expose parameters)
-2. Activate the OP (using the small plus symbol in the bottom-right corner)
-3. Select an OP and drag one of its parameters onto the rship_buddy
-> NOTE: When a parameter is dropped onto the rship_buddy, it recursively scans parent directories until it finds a Base COMP tagged 'rship', creates a custom parameter page (named the source OP) and parameter (named the source parameter), and binds the source parameter to the custom parameter. 
+1. Open the component editor window of a tagged COMP
+2. Click and drag the par to be exposed onto the component editor window
+3. See [Component Editor Dialogue](https://derivative.ca/UserGuide/Component_Editor_Dialog#:~:text=Bind%20New%20Par%20as%20Master,the%20parameter%20that%20was%20dragged.) to understand the different kinds of bindings/references in TouchDesigner
 4. Save the project
-5. Verify the parameter appears as a target in the rship GUI
-> NOTE: Because TouchDesigner uses network paths for binding parameters, renaming a source OP will cause the bindings to break and the Base COMP will error.   
-> NOTE: As of 2024/05/17 Rship-Touchdesigner currently supports float, int, bool, string, and pulse types. Support for other types (RGB, XYZ, enum, etc.) may be added as necessary.
+5. Verify the parameter appears in the rship GUI as a target
+
+> NOTE: As of 2025/03/21 Rship-Touchdesigner currently supports all primitive data types. COMPs/OPs and Python are currently unsupported.
 
 ## Using Notch TOPs
 
