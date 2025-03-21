@@ -7,16 +7,14 @@ Notch TOPs also have first-class support. Similar to Base COMPs their parameters
 ## Setup
 
 1. Download the rship.tox and drag it into a network
-> NOTE: When scanning the network for targets, the rship.tox recursively scans the directory it is in and all subdirectories. We recommend placing the rship.tox in the root of the network in order to be sure that the entire network is scanned, as well as to avoid cluttering the screen with grey reference lines.
-2. In the rship.tox parameters page, enter the address and port of a Rocketship server
+> NOTE: When scanning the network for targets, the rship.tox recursively scans the directory it is in and all subdirectories. Place the rship .tox in the root of the network to ensure that the entire network is scanned (also to avoid cluttering the screen with reference lines).
+2. In the rship .tox parameters page, enter the address and port of a Rocketship server (default 5155)
 3. Save the project
 4. Verify the TouchDesigner instance appears in the rship GUI, and activate the instance
-5. Add a tag to a Base COMP and name the tag 'rship' (using the small pencil icon in the parameters window)
-6. Save the project
-7. Verify the COMP appears as a target in the rship GUI
-> NOTE: If the Base COMP is renamed, it will automatically track through to the rship GUI
+5. Tag a Base COMP 'rship' and save the project
+6. Verify the COMP appears as a target in the rship GUI
 
-## Exposing Parameters
+## Expose Parameters
 
 1. Open the component editor window of a tagged COMP
 2. Click and drag the par to be exposed onto the component editor window
@@ -26,10 +24,9 @@ Notch TOPs also have first-class support. Similar to Base COMPs their parameters
 
 > NOTE: As of 2025/03/21 Rship-Touchdesigner currently supports all primitive data types. COMPs/OPs and Python are currently unsupported.
 
-## Using Notch TOPs
+## Use Notch TOPs
 
-1. Add an 'rship' tag to any Notch TOP
-2. Save the project
+1. Tag a Notch TOP 'rship' and save the project
 3. Verify the Notch layers and their parameters appear in the rship GUI as targets
 
 ## Targets, Actions, and Emitters
