@@ -24,6 +24,8 @@ Notch TOPs also have first-class support. Similar to Base COMPs their parameters
 
 > NOTE: As of 2025/03/21 Rship-Touchdesigner currently supports all primitive data types. COMPs/OPs and Python are currently unsupported.
 
+> Note: The unique ID for a parameter is based on its **name**. Changing its **name** will break the connection and create a new target in rship. Prefer renaming labels.
+
 ## Use Notch TOPs
 
 1. Tag a Notch TOP 'rship' and save the project
