@@ -125,7 +125,8 @@ class RshipExt:
 			serviceId=serviceId, 
 			serviceTypeCode="touchdesigner", 
 			status=InstanceStatus.Available, 
-			machineId=self.MachineId, color="#727e51"
+			machineId=self.MachineId, 
+			color="#727e51"
 		)
 
 		self.instance = instance
