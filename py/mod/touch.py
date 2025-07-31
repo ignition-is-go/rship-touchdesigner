@@ -7,6 +7,7 @@ import uuid
 ops = {}
 
 def makeParGroupTarget(client: ExecClient, instance: Instance, operator, parGroup, parentId, baseId) -> None:
+
 	parTargetId = baseId + ":" + parGroup.name
 	properties = None
 
@@ -204,106 +205,115 @@ def makeParGroupTarget(client: ExecClient, instance: Instance, operator, parGrou
 			}
 		}
 
-	if properties is None:
-		print("no properties found for", parGroup.label,"|", parGroup.style)
-		return
+	if parGroup.style == 'Sequence':
+		makeSequenceActionEmitters(client, instance, operator, parGroup, parTargetId)
 
-	schema = {
-		"type": "object",
-		"properties": properties,
-	}
+	if properties is not None: 
 
-	setAction = Action(
-		id=parTargetId + ":set",
-		name="Set " + parGroup.label,
-		targetId=parTargetId,
-		serviceId=instance.serviceId,
-		schema=schema,
-	)
+		schema = {
+			"type": "object",
+			"properties": properties,
+		}
 
-	def handle(action, data):
+		setAction = Action(
+			id=parTargetId + ":set",
+			name="Set " + parGroup.label,
+			targetId=parTargetId,
+			serviceId=instance.serviceId,
+			schema=schema,
+		)
 
-		try: 
-			parGroup.name
-		except: 
-			print("Parameter not found, Deleting Action")
-			client.removeHandler(action.id)
-			return
+		def handle(action, data):
 
-		parName = parGroup.name
+			try: 
+				parGroup.name
+			except: 
+				print("Parameter not found, Deleting Action")
+				client.removeHandler(action.id)
+				return
 
-		if parGroup.style == 'WH' and 'w' in data.keys() and 'h' in data.keys():
-			operator.par[parName + "w"] = data['w']
-			operator.par[parName + "h"] = data['h']
-			return
+			parName = parGroup.name
 
-		if parGroup.style == 'XY' and 'x' in data.keys() and 'y' in data.keys():
-			operator.par[parName + "x"] = data['x']
-			operator.par[parName + "y"] = data['y']
-			return
-		
-		
-		if parGroup.style == 'XYZ' and 'x' in data.keys() and 'y' in data.keys() and 'z' in data.keys():
-			operator.par[parName + "x"] = data['x']
-			operator.par[parName + "y"] = data['y']
-			operator.par[parName + "z"] = data['z']
-			return
-		
-		if parGroup.style == 'XYZW' and 'x' in data.keys() and 'y' in data.keys() and 'z' in data.keys() and 'w' in data.keys():
-			operator.par[parName + "x"] = data['x']
-			operator.par[parName + "y"] = data['y']
-			operator.par[parName + "z"] = data['z']
-			operator.par[parName + "w"] = data['w']
-			return
-		
-		if parGroup.style == 'RGB' and 'r' in data.keys() and 'g' in data.keys() and 'b' in data.keys():
-			operator.par[parName + "r"] = data['r']
-			operator.par[parName + "g"] = data['g']
-			operator.par[parName + "b"] = data['b']
-			return
-		
-		if parGroup.style == 'RGBA' and 'r' in data.keys() and 'g' in data.keys() and 'b' in data.keys() and 'a' in data.keys():
-			operator.par[parName + "r"] = data['r']
-			operator.par[parName + "g"] = data['g']
-			operator.par[parName + "b"] = data['b']
-			operator.par[parName + "a"] = data['a']
-			return
-		
-		if parGroup.style == 'UV' and 'u' in data.keys() and 'v' in data.keys():
-			operator.par[parName + "u"] = data['u']
-			operator.par[parName + "v"] = data['v']
-			return
+			if parGroup.style == 'WH' and 'w' in data.keys() and 'h' in data.keys():
+				operator.par[parName + "w"] = data['w']
+				operator.par[parName + "h"] = data['h']
+				return
 
-		if parGroup.style == 'UVW' and 'u' in data.keys() and 'v' in data.keys() and 'w' in data.keys():
-			operator.par[parName + "u"] = data['u']
-			operator.par[parName + "v"] = data['v']
-			operator.par[parName + "w"] = data['w']
-			return
-		
-		if parGroup.style == 'Pulse':
-			operator.par[parName].pulse()
-			return
-		if (parGroup.style == 'Float' or parGroup.style =='Int') and parGroup.size > 1:
-			for i in parGroup.subLabel:
-				operator.par[i] = data[i]
-			return
-				
-		if 'value' in data.keys():
-			operator.par[parName] = data['value']
-			return
+			if parGroup.style == 'XY' and 'x' in data.keys() and 'y' in data.keys():
+				operator.par[parName + "x"] = data['x']
+				operator.par[parName + "y"] = data['y']
+				return
+			
+			
+			if parGroup.style == 'XYZ' and 'x' in data.keys() and 'y' in data.keys() and 'z' in data.keys():
+				operator.par[parName + "x"] = data['x']
+				operator.par[parName + "y"] = data['y']
+				operator.par[parName + "z"] = data['z']
+				return
+			
+			if parGroup.style == 'XYZW' and 'x' in data.keys() and 'y' in data.keys() and 'z' in data.keys() and 'w' in data.keys():
+				operator.par[parName + "x"] = data['x']
+				operator.par[parName + "y"] = data['y']
+				operator.par[parName + "z"] = data['z']
+				operator.par[parName + "w"] = data['w']
+				return
+			
+			if parGroup.style == 'RGB' and 'r' in data.keys() and 'g' in data.keys() and 'b' in data.keys():
+				operator.par[parName + "r"] = data['r']
+				operator.par[parName + "g"] = data['g']
+				operator.par[parName + "b"] = data['b']
+				return
+			
+			if parGroup.style == 'RGBA' and 'r' in data.keys() and 'g' in data.keys() and 'b' in data.keys() and 'a' in data.keys():
+				operator.par[parName + "r"] = data['r']
+				operator.par[parName + "g"] = data['g']
+				operator.par[parName + "b"] = data['b']
+				operator.par[parName + "a"] = data['a']
+				return
+			
+			if parGroup.style == 'UV' and 'u' in data.keys() and 'v' in data.keys():
+				operator.par[parName + "u"] = data['u']
+				operator.par[parName + "v"] = data['v']
+				return
 
-		
-		print("sometimes data not is match", data, parGroup.style)
+			if parGroup.style == 'UVW' and 'u' in data.keys() and 'v' in data.keys() and 'w' in data.keys():
+				operator.par[parName + "u"] = data['u']
+				operator.par[parName + "v"] = data['v']
+				operator.par[parName + "w"] = data['w']
+				return
+			
+			if parGroup.style == 'Pulse':
+				operator.par[parName].pulse()
+				return
+			if (parGroup.style == 'Float' or parGroup.style =='Int') and parGroup.size > 1:
+				for i in parGroup.subLabel:
+					operator.par[i] = data[i]
+				return
+					
+			if 'value' in data.keys():
+				operator.par[parName] = data['value']
+				return
 
-	client.saveHandler(setAction.id, handle)
+			
+			print("sometimes data not is match", data, parGroup.style)
 
-	valueEmitter = Emitter(
-		id=parTargetId + ":valueUpdated",
-		name=parGroup.label + " Value Updated",
-		targetId=parTargetId,
-		serviceId=instance.serviceId,
-		schema=schema
-	)
+		client.saveHandler(setAction.id, handle)
+
+		valueEmitter = Emitter(
+			id=parTargetId + ":valueUpdated",
+			name=parGroup.label + " Value Updated",
+			targetId=parTargetId,
+			serviceId=instance.serviceId,
+			schema=schema
+		)
+
+		client.saveAction(setAction)
+
+		# save emitters
+		client.saveEmitter(valueEmitter)
+
+	else: 
+		print("no default properties for", parGroup.style, "par group", parGroup.name)
 
 	clarification = ""
 	if parGroup.name.lower() != parGroup.label.replace(" ", "").lower():
@@ -313,9 +323,7 @@ def makeParGroupTarget(client: ExecClient, instance: Instance, operator, parGrou
 	t = Target(
 		id=parTargetId,
 		name=parGroup.label + clarification,
-		actionIds=[setAction.id],
-		emitterIds=[valueEmitter.id],
-		parentTargets=[parentId],
+		parentTargets=[f"{parentId}:{parGroup.sequence.name}" if parGroup.sequence else parentId],
 		serviceId=instance.serviceId,
 		category="Parameter",
 		bgColor="#727e51",
@@ -324,16 +332,63 @@ def makeParGroupTarget(client: ExecClient, instance: Instance, operator, parGrou
 		rootLevel=False
 	)
 
+	print("Saving par target", t.id, "on", t.parentTargets)
+
 	# save those targets
 	client.saveTarget(t)
 	client.setTargetStatus(t, instance, Status.Online)
 
 	# save actions
 
-	client.saveAction(setAction)
+def makeSequenceActionEmitters(client: ExecClient, instance: Instance, operator, sequencePar, targetId) -> None:
 
-	# save emitters
-	client.saveEmitter(valueEmitter)
+	targetId = targetId + ":" + sequencePar.name
+
+	increaseAction = Action(
+		 id=f"{targetId}:increase",
+		 name=f"Add Block",
+		 targetId=targetId,
+		 serviceId=instance.serviceId,
+		 schema=None
+	 )
+	
+	def handle_increase(action, data):
+		# handle the increase action
+		print("Increase action triggered for", targetId)
+
+		currentNumBlocks = len(sequencePar.blocks)
+
+		sequencePar.insertBlock(currentNumBlocks)
+
+		print(f"Added block {currentNumBlocks} to sequence {sequencePar.name}")
+
+	client.saveHandler(increaseAction.id, handle_increase)
+	client.saveAction(increaseAction)
+
+	decreaseAction = Action(
+		 id=f"{targetId}:decrease",
+		 name=f"Remove Block",
+		 targetId=targetId,
+		 serviceId=instance.serviceId,
+		 schema=None
+	 )
+	
+
+	def handle_decrease(action, data):
+		# handle the decrease action
+		print("Decrease action triggered for", targetId)
+
+		currentNumBlocks = len(sequencePar.blocks)
+
+		if currentNumBlocks > 0:
+			sequencePar.removeBlock(currentNumBlocks - 1)
+			print(f"Removed block {currentNumBlocks - 1} from sequence {sequencePar.name}")
+		else:
+			print("No blocks to remove from sequence", sequencePar.name)
+
+	client.saveHandler(decreaseAction.id, handle_decrease)
+	client.saveAction(decreaseAction)
+
 
 def makePageTarget(client: ExecClient, instance: Instance, operator, page, parentId) -> None:
 
@@ -343,8 +398,6 @@ def makePageTarget(client: ExecClient, instance: Instance, operator, page, paren
 	t = Target(
 		id=pageTargetId,
 		name=page.name,
-		actionIds=[],
-		emitterIds=[],
 		parentTargets=[parentId],
 		serviceId=instance.serviceId,
 		category="Page",
@@ -418,8 +471,6 @@ def makeOpTarget(client: ExecClient, instance: Instance, operator: OP) -> None:
 	target = Target(
 		id=targetId, 
 		name=operator.name, 
-		actionIds=[enableAction.id, disableAction.id], 
-		emitterIds=[], 
 		parentTargets=[],
 		serviceId=instance.serviceId, 
 		category="Base Comp",
@@ -437,6 +488,10 @@ def cleanDeleted(client: ExecClient, instance: Instance) -> None:
 	
 	targetsToRemove = []
 
+	print("Cleaning deleted ops and targets")
+
+	print(ops)
+
 	for id, o in ops.items():
 		operator = op(o.path)
 		
@@ -451,15 +506,17 @@ def cleanDeleted(client: ExecClient, instance: Instance) -> None:
 			targetsToRemove.append(target.id)
 			continue
 						
-						
-						
+	print("Checking targets", [target.id for target in client.targets.values()])
 	for target in client.targets.values():
 		sections = target.id.split(":")
 						
 		if len(sections) < 2: 
+			print("target", target.id, "has no sections - skipping")
 			continue
 			
 		baseTargetId = sections[0]
+
+		print("Checking base target", baseTargetId, "for", target.id)
 		
 		if baseTargetId not in ops:
 			print(baseTargetId, "not found in ops - setting it offline")
@@ -479,13 +536,21 @@ def cleanDeleted(client: ExecClient, instance: Instance) -> None:
 			
 		slug = sections[1]
 		if operator == None:
+			print("op not found for", target.id)
 			continue
-		if slug not in operator.customPages and slug not in operator.pages and not hasattr(operator.parGroup, slug):
+
+		pageNames = [page.name for page in operator.customPages] + [page.name for page in operator.pages]
+
+		isExistingPage = slug in pageNames
+		
+		isExistingPar = hasattr(operator.pars, slug) or hasattr(operator.parGroup, slug)
+
+		if not isExistingPage and not isExistingPar:
 			print("marking", target.id, "offline", slug)
 			client.setTargetOffline(target, instance)
 			targetsToRemove.append(target.id)
 			continue
-	
+
 	for id in targetsToRemove:
 		client.removeTarget(id)
 	

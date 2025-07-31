@@ -23,12 +23,10 @@ class RshipExt:
 		self.machineIdOp = self.ownerComp.op('machine_id')
 
 		self.websocketOp = self.ownerComp.op('websocket')
+		self.rshipUrlOp = self.ownerComp.op('rship_url')
 
 		self.targetsOp = self.ownerComp.op('path_and_pars')
 		
-		
-
-
 		self.client = ExecClient()
 		self.client.setSend(self.websocketOp.sendText)
 
@@ -41,6 +39,7 @@ class RshipExt:
 
 		TDF.createProperty(self, 'Connection', value="Disconnected", dependable=True, readOnly=False)
 		self.clientIdRequests = {}
+		self.rshipHostRequests = {}
 
 		self.ops = {}
 
@@ -49,7 +48,9 @@ class RshipExt:
 
 	def OnProjectPreSave(self):
 		self.findTargets()
-		self.updateMachineId()
+		self.updateRshipUrl()
+		# self.updateMachineId()
+
 
 
 	def OnMachineIdClientConnect(self, requestId: str):
@@ -64,7 +65,7 @@ class RshipExt:
 			# if the machine id not coming from the Rship Link, we need to provide Rship with our machine
 			machine = Machine(self.MachineId, socket.gethostname())
 			self.client.set(machine)
-			self.afterMachineId()
+			self.refreshConnection()
 
 
 	def OnMachineIdUpdate(self, machineId: str | None, requestId: str):
@@ -73,11 +74,56 @@ class RshipExt:
 		
 		print("[RshipExt]: Machine ID updated from Rship Link:", machineId)
 		self.MachineId = machineId
-		self.afterMachineId()
+		self.refreshConnection()
 		# since machineId is coming from the Rship Link, we need not send the machine info
 
 
-	def afterMachineId(self):
+	def OnRshipUrlClientConnect(self, requestId: str):
+		self.rshipHostRequests[requestId] = True
+
+	
+	def OnRshipUrlClientDisconnect(self, requestId: str):
+		if requestId in self.rshipHostRequests:
+			del self.rshipHostRequests[requestId]
+			print("[RshipExt]: Rship Host Request Failed, leaving the address as is")
+			self.updateMachineId()
+			# if the machine id not coming from the Rship Link, we need to provide Rship with our machine
+
+	def OnRshipUrlUpdate(self, rship_host: str | None, requestId: str):
+		if requestId in self.rshipHostRequests:
+			del self.rshipHostRequests[requestId]
+
+		print("[RshipExt]: Rship Host updated from Rship Link:", rship_host)
+
+		port = 5155
+
+		if rship_host is not None:
+
+			sections = rship_host.split("://")
+
+
+			print(sections)
+
+			protocol = sections[0]
+			path = sections[1]
+
+			path_sections = path.split(":")
+
+			path = path_sections[0]
+
+			after_colon = path_sections[1] if len(path_sections) > 1 else port
+
+			after_colon_sections = after_colon.split("/")
+
+			port = after_colon_sections[0] if after_colon_sections else port
+
+			rship_host = f"{protocol}://{path}"
+			
+		self.ownerComp.par.Port = int(port)
+		self.ownerComp.par.Address = rship_host
+		# since machineId is coming from the Rship Link, we need not send the machine info
+
+	def refreshConnection(self):
 		self.buildInstance()
 		self.client.set(self.instance)
 		self.buildTargets()
@@ -109,6 +155,11 @@ class RshipExt:
 	def updateMachineId(self):
 		print("[RshipExt]: Updating machine ID from Rship Link...")
 		self.machineIdOp.par.request.pulse()
+
+	
+	def updateRshipUrl(self):
+		print("[RshipExt]: Updating Rship URL from Rship Link...")
+		self.rshipUrlOp.par.request.pulse()
 
 
 

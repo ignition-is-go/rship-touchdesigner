@@ -6,6 +6,7 @@
 # Make sure the corresponding toggle is enabled in the Execute DAT.
 
 def onStart():
+	me.ext.RshipExt.OnProjectPreSave()
 	return
 
 def onCreate():

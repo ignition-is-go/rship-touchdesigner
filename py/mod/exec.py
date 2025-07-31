@@ -7,11 +7,9 @@ from typing import Dict, List
 
 
 class Target(MItem):
-    def __init__(self, id: str, name: str, actionIds: [str], emitterIds: [str], parentTargets: [str], serviceId: str, bgColor: str, fgColor: str, lastUpdated: str, category: str, rootLevel: bool):
+    def __init__(self, id: str, name: str,  parentTargets: [str], serviceId: str, bgColor: str, fgColor: str, lastUpdated: str, category: str, rootLevel: bool):
         super().__init__(id, name)
 
-        self.actionIds = actionIds
-        self.emitterIds = emitterIds
         self.subTargets = []
         self.serviceId = serviceId
         self.bgColor = bgColor
