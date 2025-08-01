@@ -1,13 +1,14 @@
 from datetime import datetime, timezone
 import json
-from myko import MEvent, MEventType, MItem, MCommand, WSEvent, MQuery, MWrappedQuery, WSQuery, WSCommand, MWrappedCommand
+from myko import MEvent, MEventType, MItem, MCommand, QueryResponse, WSEvent, MQuery, MWrappedQuery, WSQuery, WSCommand, MWrappedCommand
 from uuid import uuid4
 from enum import Enum
-from typing import Dict, List
+from typing import Dict, List, Callable, Self
+
 
 
 class Target(MItem):
-    def __init__(self, id: str, name: str,  parentTargets: [str], serviceId: str, bgColor: str, fgColor: str, lastUpdated: str, category: str, rootLevel: bool):
+    def __init__(self, id: str, name: str,  parentTargets: List[str], serviceId: str, bgColor: str, fgColor: str, lastUpdated: str, category: str, rootLevel: bool):
         super().__init__(id, name)
 
         self.subTargets = []
@@ -36,21 +37,25 @@ class TargetStatus(MItem):
 
 
 class Action(MItem):
-    def __init__(self, id: str, name: str, targetId: str, serviceId: str, schema: str):
+    def __init__(self, id: str, name: str, targetId: str, serviceId: str, schema: str, handler: Callable[[Self, Dict[str, any]], None]):
         super().__init__(id, name)
 
         self.schema = schema
         self.targetId = targetId
         self.serviceId = serviceId
+        self.handler = handler
 
 
 class Emitter(MItem):
-    def __init__(self, id: str, name: str, targetId: str, serviceId: str, schema: any):
+    def __init__(self, id: str, name: str, targetId: str, serviceId: str, schema: any, changeKey: str, handler: Callable):
         super().__init__(id, name)
 
         self.targetId = targetId
         self.serviceId = serviceId
         self.schema = schema
+        self.changeKey = changeKey
+        self.handler = handler          
+        
 
 
 class Pulse(MItem):
@@ -142,6 +147,12 @@ class GetWebRTCConnections(MQuery):
         super().__init__()
 
 
+class GetTargetsByServiceId(MQuery):
+    def __init__(self, serviceId: str):
+        super().__init__()
+        self.serviceId = serviceId
+
+
 class AddAnswerCandidate(MCommand):
     def __init__(self, id: str, candidate: IceCandidate):
         super().__init__(str(datetime.now(timezone.utc).isoformat()))
@@ -199,7 +210,7 @@ class ExecClient:
             self.log("Message was: " + message)
             
 
-    def sendQuery(self, query: MQuery, queryItemType: str, handler: callable = None):
+    def sendQuery(self, query: MQuery, queryItemType: str, handler: Callable[[QueryResponse], None]):
         wrappedQuery = MWrappedQuery(
             queryId=type(query).__name__,
             queryItemType=queryItemType,
@@ -238,7 +249,7 @@ class ExecClient:
             
         handler = self.queryHandlers[data['tx']]
         if handler:
-            handler(data)
+            handler(QueryResponse(data))
         else:
             self.log("No handler found for query tx: " + data['tx'])
 
@@ -251,16 +262,16 @@ class ExecClient:
         self.targets[target.id] = target
         self.set(target)
 
-    def setTargetOffline(self, target: Target, instance: Instance):
-        self.setTargetStatus(target, instance, Status.Offline)
+    def setTargetOffline(self, targetId: str, instanceId: str):
+        self.setTargetStatus(targetId, instanceId, Status.Offline)
 
-    def setTargetStatus(self, target: Target, instance: Instance, status: Status):
+    def setTargetStatus(self, targetId: str, instanceId: str, status: Status):
 
         ts = TargetStatus(
-            id=target.id + ":status",
-            name=target.name + " Status",
-            targetId=target.id,
-            instanceId=instance.id,
+            id=targetId + ":status",
+            name=targetId + " Status",
+            targetId=targetId,
+            instanceId=instanceId,
             status=status,
             lastUpdated=datetime.now(timezone.utc).isoformat()
         )
@@ -296,7 +307,7 @@ class ExecClient:
             if action.targetId == targetId:
                 self.removeHandler(actionId)
 
-    def saveHandler(self, actionId: str, handler: callable):
+    def saveHandler(self, actionId: str, handler: Callable[[Action, Dict[str, any]], None]):
         self.handlers[actionId] = handler
 
     def removeHandler(self, actionId: str):

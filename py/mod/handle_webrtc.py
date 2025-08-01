@@ -1,4 +1,5 @@
 from exec import Stream,WebRTCConnection, GetWebRTCConnections, SetAnswer, AddAnswerCandidate, IceCandidate, ExecClient
+from myko import QueryResponse
 
 remote_to_local_map = {}
 local_to_remote_map = {}
@@ -13,13 +14,13 @@ def init(client: ExecClient):
 	client.sendQuery(query, type(WebRTCConnection).__name__, handleConnectionQuery)
 
 
-def handleConnectionQuery(data): 
+def handleConnectionQuery(data: QueryResponse): 
 	global stream_sources, remote_to_local_map, local_to_remote_map
 	rtc = op('../../webrtc_connections')
-	upserts = data['upserts']
+	upserts = data.upserts
 
 
-	if(data['sequence'] == 0):
+	if(data.sequence == 0):
 		for id in rtc.peerConnections:
 			rtc.closeConnection(id)
 		remote_to_local_map.clear()
@@ -34,7 +35,7 @@ def handleConnectionQuery(data):
 		
 
 
-	for delete in data['deletes']:
+	for delete in data.deletes:
 		remote_id = delete
 		if remote_id in remote_to_local_map:
 			local_id = remote_to_local_map[remote_id]
@@ -42,8 +43,8 @@ def handleConnectionQuery(data):
 
 
 	for upsert in upserts:
-		remote_id = upsert['item']['id']
-		stream_id = upsert['item']['streamId']
+		remote_id = upsert.item.id
+		stream_id = upsert.item['streamId']
 
 		if stream_id not in stream_sources:
 			continue
@@ -56,16 +57,16 @@ def handleConnectionQuery(data):
 
 		local_id = remote_to_local_map[remote_id]
 		
-		for candidate in upsert['item']['answerCandidates']:
+		for candidate in upsert.item['answerCandidates']:
 			rtc.addIceCandidate(local_id, candidate['candidate'], candidate['sdpMid'], candidate['sdpMLineIndex'])
 
 
-		if 'sdpAnswer' in upsert['item']:
+		if 'sdpAnswer' in upsert.item:
 			return
 
 
-		if 'sdpOffer' in upsert['item']:
-			rtc.setRemoteDescription(local_id, 'offer', upsert['item']['sdpOffer'])
+		if 'sdpOffer' in upsert.item:
+			rtc.setRemoteDescription(local_id, 'offer', upsert.item['sdpOffer'])
 
 			rtc.createAnswer(local_id)
 		

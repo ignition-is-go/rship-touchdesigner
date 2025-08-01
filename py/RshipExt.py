@@ -7,12 +7,35 @@ can be accessed externally, e.g. op('yourComp').PromotedFunction().
 
 Help: search "Extensions" in wiki
 """
-from TDStoreTools import StorageManager
+from typing import Dict
 import TDFunctions as TDF
 import socket
-from exec import ExecClient, Instance, Machine, InstanceStatus
-from touch import makeOpTarget, cleanDeleted, pulseEmitter
+from exec import ExecClient, GetTargetsByServiceId, Instance, Machine, InstanceStatus, Status, Action, Emitter
+# from touch import makeOpTarget, cleanDeleted, pulseEmitter
 from handle_webrtc import init as initWebRTC, handle_on_answer, handle_on_ice_candidate
+from myko import QueryResponse
+from op_target import OPTarget
+import json
+
+from target import TouchTarget
+from util import makeEmitterChangeKey, makeServiceId
+
+# region ExecInfo
+
+class ExecInfo:
+	connected: bool
+	rshipUrl: str | None
+	machineId: str
+	
+
+	def __init__(self, machineId: str, connected: bool, rshipUrl: str | None):
+		self.machineId = machineId
+		self.connected = connected
+		self.rshipUrl = rshipUrl
+
+# endregion ExecInfo
+
+# region RshipExt
 
 class RshipExt:
 
@@ -20,10 +43,9 @@ class RshipExt:
 		self.ownerComp = ownerComp
 		self.findTargetsOp = self.ownerComp.op('find_targets')
 		
-		self.machineIdOp = self.ownerComp.op('machine_id')
 
 		self.websocketOp = self.ownerComp.op('websocket')
-		self.rshipUrlOp = self.ownerComp.op('rship_url')
+		self.execInfoOp = self.ownerComp.op('exec_info')
 
 		self.targetsOp = self.ownerComp.op('path_and_pars')
 		
@@ -36,73 +58,113 @@ class RshipExt:
 		TDF.createProperty(self, 'MachineId', value=None, dependable=True,
 						   readOnly=False)
 
+		TDF.createProperty(self, "wsConnected", value=False, dependable=True, readOnly=False)
+		
+		self.execInfoRequests = {}
 
-		TDF.createProperty(self, 'Connection', value="Disconnected", dependable=True, readOnly=False)
-		self.clientIdRequests = {}
-		self.rshipHostRequests = {}
-
-		self.ops = {}
+		self.opTargets: Dict[str, OPTarget] = {}
+		self.allTouchTargets: Dict[str, TouchTarget] = {}
 
 		self.instance: Instance | None = None
 
+		self.emitterIndex: Dict[str, Emitter] = {}
+		self.emitterHandlers: Dict[str, callable] = {}
+
+
+	@property
+	def ConnectionStatus(self):
+		return "Connected" if self.wsConnected else "Disconnected"
+
 
 	def OnProjectPreSave(self):
-		self.findTargets()
-		self.updateRshipUrl()
-		# self.updateMachineId()
+		self.cookTargetList()
+		self.updateExecInfo()
 
 
+# region exec info 
+	def updateExecInfo(self):
+		print("[RshipExt]: Updating Exec Info from Rship Link...")
+		self.execInfoOp.par.request.pulse()
 
-	def OnMachineIdClientConnect(self, requestId: str):
-		self.clientIdRequests[requestId] = True
+	def OnExecInfoClientConnect(self, requestId: str):
+		print("[RshipExt]: Exec Info Client connected with request ID:", requestId)
+		self.execInfoRequests[requestId] = True
 
-	
-	def OnMachineIdClientDisconnect(self, requestId: str):
-		if requestId in self.clientIdRequests:
-			del self.clientIdRequests[requestId]
-			print("[RshipExt]: Machine Id Request Failed, falling back to hostname")
-			self.MachineId = socket.gethostname()
-			# if the machine id not coming from the Rship Link, we need to provide Rship with our machine
-			machine = Machine(self.MachineId, socket.gethostname())
-			self.client.set(machine)
-			self.refreshConnection()
+	def OnExecInfoClientDisconnect(self, requestId: str):
+		if requestId in self.execInfoRequests:
+			del self.execInfoRequests[requestId]
+			print("[RshipExt]: Failed to get Exec Info from Rship Link")
+			self.handleLinkMachineId(None)
+			self.handleLinkRshipUrl(None)
+
+			print("[RshipExt]: Refreshing project data")
+			self.refreshProjectData()
+
+	def OnExecInfoUpdate(self, data: ExecInfo, requestId: str):
+		if requestId in self.execInfoRequests:
+			del self.execInfoRequests[requestId]
+
+		print("[RshipExt]: Exec Info received:", data)
+
+		data = json.loads(data)
+
+		machineId = data.get('machineId', None)
+		connection = data.get('connectionStatus', None)
+		print("CONN", connection)
+		rshipUrl = connection.get('data', None) if connection else None
+
+		self.handleLinkRshipUrl(rshipUrl)
+		self.handleLinkMachineId(machineId)
+		self.refreshProjectData()
+
+# endregion exec info
+
+# region WebSocket Callbacks
+
+	def targetListUpdated(self, data: QueryResponse):
+		for target in data.upserts:
+			if target.item['id'] not in self.allTouchTargets:
+				print(f"[RshipExt]: Remote target not found: {target.item['id']}")
+				self.client.setTargetOffline(target.item['id'], self.instance.id)
 
 
-	def OnMachineIdUpdate(self, machineId: str | None, requestId: str):
-		if requestId in self.clientIdRequests:
-			del self.clientIdRequests[requestId]
+	def OnRshipConnect(self):
+		self.wsConnected = True
+		print("[RshipExt]: Connected to Rship Server at ", self.websocketOp.par.netaddress.eval())
+		initWebRTC(self.client)
+		self.refreshProjectData()
+		self.client.sendQuery(GetTargetsByServiceId(makeServiceId()), "Target", self.targetListUpdated)
+
+
+	def OnRshipDisconnect(self):
+		self.wsConnected = False
+		print("[RshipExt]: Disconnected from Rship Server")
+
+	def OnRshipReceiveText(self, text: str):
 		
-		print("[RshipExt]: Machine ID updated from Rship Link:", machineId)
+		self.client.parseMessage(text)
+
+# endregion
+
+# region exec info handlers
+
+	def handleLinkMachineId(self, machineId: str | None):
+		print("MACHINE", machineId)
+		if machineId is None or machineId == "":
+			hostname = socket.gethostname()
+			print("[RshipExt]: Machine Id not provided, using fallback", hostname)
+			self.MachineId = hostname  # Fallback to hostname if not set
+			return
+		
 		self.MachineId = machineId
-		self.refreshConnection()
-		# since machineId is coming from the Rship Link, we need not send the machine info
 
-
-	def OnRshipUrlClientConnect(self, requestId: str):
-		self.rshipHostRequests[requestId] = True
-
-	
-	def OnRshipUrlClientDisconnect(self, requestId: str):
-		if requestId in self.rshipHostRequests:
-			del self.rshipHostRequests[requestId]
-			print("[RshipExt]: Rship Host Request Failed, leaving the address as is")
-			self.updateMachineId()
-			# if the machine id not coming from the Rship Link, we need to provide Rship with our machine
-
-	def OnRshipUrlUpdate(self, rship_host: str | None, requestId: str):
-		if requestId in self.rshipHostRequests:
-			del self.rshipHostRequests[requestId]
-
-		print("[RshipExt]: Rship Host updated from Rship Link:", rship_host)
+	def handleLinkRshipUrl(self, rship_host: str | None):
 
 		port = 5155
 
 		if rship_host is not None:
 
 			sections = rship_host.split("://")
-
-
-			print(sections)
 
 			protocol = sections[0]
 			path = sections[1]
@@ -118,57 +180,80 @@ class RshipExt:
 			port = after_colon_sections[0] if after_colon_sections else port
 
 			rship_host = f"{protocol}://{path}"
-			
-		self.ownerComp.par.Port = int(port)
+
+
+		port = int(port)
+
+		if self.ownerComp.par.Port.eval() == port and self.ownerComp.par.Address.eval() == rship_host and self.websocketOp.par.active.eval():
+			print("[RshipExt]: Rship already connected to", rship_host, "on port", port)
+			print("[RshipExt]: Refreshing targets manuallly")
+			if not self.wsConnected:
+				self.ownerComp.par.Reconnect.pulse()
+			return
+
+		self.ownerComp.par.Port = port
 		self.ownerComp.par.Address = rship_host
+		print("[RshipExt]: Setting Rship host to", rship_host, "on port", port)
+
+
 		# since machineId is coming from the Rship Link, we need not send the machine info
 
-	def refreshConnection(self):
-		self.buildInstance()
-		self.client.set(self.instance)
+	def refreshProjectData(self):
+		self.updateLocalInstance()
 		self.buildTargets()
 
+		if self.wsConnected:
+			self.sendProjectData()
+		else:
+			print("[RshipExt]: Not connected to Rship Server, cannot send project data")
 
-	def OnRshipConnect(self):
-		self.Connection = "Connected"
-		print("[RshipExt]: Connected to Rship Server at ", self.websocketOp.par.netaddress.eval())
-		self.findTargets()
-		self.updateMachineId()
-		initWebRTC(self.client)
-
-
-	def OnRshipDisconnect(self):
-		self.Connection = "Disconnected"
-		print("[RshipExt]: Disconnected from Rship Server")
-		pass
-
-	def OnRshipReceiveText(self, text: str):
-		self.client.parseMessage(text)
-		pass
+# endregion
 
 
-	def findTargets(self):
-		print("[RshipExt]: Finding targets...")
+# region Project Management
+
+
+	def cookTargetList(self):
+		print("[RshipExt]: Finding OpTargets...")
 		self.findTargetsOp.cook(force=True)
 		
 
-	def updateMachineId(self):
-		print("[RshipExt]: Updating machine ID from Rship Link...")
-		self.machineIdOp.par.request.pulse()
+	def buildTargets(self):
 
-	
-	def updateRshipUrl(self):
-		print("[RshipExt]: Updating Rship URL from Rship Link...")
-		self.rshipUrlOp.par.request.pulse()
+		print("[RshipExt]: Building targets...")
+
+		ops = [op(self.targetsOp[i, 0].val) for i in range(0, self.targetsOp.numRows)]
+
+		print("[RshipExt]: Found", len(ops), "ops")
+
+		foundOps: Dict[str, OPTarget] = {}
+
+		for o in ops:
+			opTarget = OPTarget(o, self.instance)
+
+			if opTarget.id in foundOps:
+				print(f"[RshipExt]: Target with ID {opTarget.id} already exists")
+				opTarget.regenerateId()
+
+			foundOps[opTarget.id] = opTarget
+
+		self.opTargets = foundOps
+
+		allTouchTargets = [child for target in self.opTargets.values() for child in target.collectChildren()]
+
+		self.allTouchTargets = {target.id: target for target in allTouchTargets}
+		print(f"[RshipExt]: Found {len(allTouchTargets)} TouchTargets in total")
+		print("all TouchTargets", self.allTouchTargets.keys())
 
 
 
-	def buildInstance(self): 
-		projectfile = project.name
-		sections = projectfile.split(".")
-		
-		
-		serviceId = sections[0]
+	def updateLocalInstance(self): 
+
+		serviceId = makeServiceId();
+
+		print(f"[RshipExt]: Updating local instance with service ID: {serviceId}")
+		print("machineId", self.MachineId)
+
 
 		instance = Instance(
 			id=self.MachineId+":"+serviceId, 
@@ -181,33 +266,83 @@ class RshipExt:
 		)
 
 		self.instance = instance
-		print(f"[RshipExt]: Instance created:\n  ID: {instance.id},\n  Name: {instance.name}")
+		print(f"[RshipExt]: Local Instance updated:\n  ID: {instance.id},\n  Name: {instance.name}")
 
 
-	def buildTargets(self):
+# endregion
 
-		print("[RshipExt]: Building targets...")
+# ws senders
 
-		ops = [op(self.targetsOp[i, 0].val) for i in range(0, self.targetsOp.numRows)]
-
-		print("[RshipExt]: Found", len(ops), "targets")
-		
+	def sendProjectData(self):
 		if self.instance is None:
-			print("[RshipExt]: Instance is not set, cannot build targets")
+			print("[RshipExt]: Instance is not set, cannot send project data")
+			return
+		
+		if self.wsConnected is False:
+			print("[RshipExt]: Not connected to Rship Server, cannot send project data")
 			return
 
-		if self.client is None:
-			print("[RshipExt]: Client is not set, cannot build targets")
-			return
+		self.client.set(self.instance)
 
-		for o in ops: 
-			makeOpTarget(self.client, self.instance, o)
 
-		cleanDeleted(self.client, self.instance)
+		allTouchTargets = [child for target in self.opTargets.values() for child in target.collectChildren()]
+
+		allTargets = [target.getTarget() for target in allTouchTargets]
+		allActions = [action for target in allTouchTargets for action in target.getActions()]
+		allEmitters = [emitter for target in allTouchTargets for emitter in target.getEmitters()]
+
+
+		for target in allTargets:
+			# print(f"[RshipExt]: Sending target {target.id} to server")
+			self.client.saveTarget(target)
+			self.client.setTargetStatus(target.id, self.instance.id, Status.Online)
+		
+		for action in allActions:
+			self.client.saveHandler(action.id, action.handler)
+			
+			del action.handler  # Remove handler from action to avoid circular references
+			self.client.saveAction(action)
+
+		for emitter in allEmitters:
+			self.emitterIndex[emitter.changeKey] = emitter
+			self.emitterHandlers[emitter.changeKey] = emitter.handler
+			
+			del emitter.handler  # Remove handler from emitter to avoid circular references
+			del emitter.changeKey
+			self.client.saveEmitter(emitter)
+	
+
+		
 
 	def PulseEmitter(self, opPath: str, parName: str):
-		pulseEmitter(opPath, parName, self.client)
+		changeKey = makeEmitterChangeKey(opPath, parName)
 
+		emitter = self.emitterIndex.get(changeKey, None)
+		if emitter is None:
+			print(f"[RshipExt]: No emitter found for change key {changeKey}")
+			return
+		
+
+		handler = self.emitterHandlers.get(changeKey, None)
+
+
+
+		if handler is None:
+			print(f"[RshipExt]: No handler found for emitter {changeKey}")
+			return
+		
+
+		data = handler()
+
+		if data is None:
+			print(f"[RshipExt]: No data returned from emitter handler for {changeKey}")
+			return
+		
+		self.client.pulseEmitter(emitter.id, data)
+
+		# pulseEmitter(opPath, parName, self.client)
+
+# region WebRTC Handlers
 
 	def HandleWebRTCAnswer(self, connectionId: str, localSdp: str):
 		handle_on_answer(connectionId, localSdp, self.client)
@@ -215,3 +350,7 @@ class RshipExt:
 
 	def HandleWebRTCIceCandidate(self, connectionId: str, candidate: str, sdpMid: str, lineIndex: int):
 		handle_on_ice_candidate(connectionId, candidate, sdpMid, lineIndex, self.client)
+
+# endregion WebRTC Handlers
+
+# endregion RshipExt

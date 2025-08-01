@@ -1,4 +1,5 @@
 from enum import Enum
+from typing import List
 from uuid import uuid4
 
 class MEventType(Enum): 
@@ -15,6 +16,12 @@ class MEvent:
 		self.changeType = changeType.value
 		self.item = item.__dict__
 		self.itemType = type(item).__name__
+
+
+class MWrappedItem:
+	def __init__(self, data: any):
+		self.itemType = data.get('itemType', None)
+		self.item = data.get('item', None)
 
 class WSEvent: 
 	def __init__(self, data: MEvent): 
@@ -52,3 +59,10 @@ class MWrappedCommand:
 	def __init__(self,  data: MCommand):
 		self.command = data.__dict__
 		self.commandId = type(data).__name__
+
+class QueryResponse: 
+	def __init__(self, data: any):
+		self.tx: str = data['tx']
+		self.upserts: List[MWrappedItem] = [MWrappedItem(item) for item in data.get('upserts', [])]
+		self.deletes: List[str] = data.get('deletes', [])
+		self.sequence: int = data.get('sequence', 0)
