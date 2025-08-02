@@ -3,13 +3,10 @@ from uuid import uuid4
 from page_target import PageTarget
 from typing import Dict, List, Optional
 from target import TouchTarget
-from exec import Target,Instance
-from util import makeServiceId
+from exec import Action, Target,Instance
+from util import RS_BUNDLE_COMPLETE_PAR, RS_TARGET_ID_PAR, RS_TARGET_ID_STORAGE_KEY, RS_TARGET_INFO_PAGE
 
-RS_TARGET_INFO_PAGE = "Rship Target Config"
-RS_BUNDLE_COMPLETE_PAR = "Rsbundlecomplete"
-RS_TARGET_ID_PAR = "Rstargetid"
-RS_TARGET_ID_STORAGE_KEY = 'rs_target_id'
+
 
 class OPTarget(TouchTarget):
 
@@ -22,6 +19,7 @@ class OPTarget(TouchTarget):
         # print("[OPTarget]: Initializing OPTarget at " + ownerComp.path)
         self.ensureUtilPars()
         self.buildPageTargets()
+        self.organizePars()
 
     @property
     def id(self):
@@ -53,20 +51,39 @@ class OPTarget(TouchTarget):
 
         page = self.ownerComp.customPages[RS_TARGET_INFO_PAGE]
 
-        if RS_BUNDLE_COMPLETE_PAR not in page.pars:
-            page.appendPulse(RS_BUNDLE_COMPLETE_PAR, label="Bundle Complete")
-
-
         if RS_TARGET_ID_PAR not in page.pars:
             page.appendStr(RS_TARGET_ID_PAR, label="Target ID")
 
-        # bundleCompletePar = self.ownerComp.par[RS_BUNDLE_COMPLETE_PAR]
-        # bundleCompletePar.readOnly = False
+        if RS_BUNDLE_COMPLETE_PAR not in page.pars:
+            page.appendPulse(RS_BUNDLE_COMPLETE_PAR, label="All Op Pars Updated")
+
+        bundleCompletePar = self.ownerComp.par[RS_BUNDLE_COMPLETE_PAR]
+
+        bundleCompletePar.startSection = True
 
         targetIdPar = self.ownerComp.par[RS_TARGET_ID_PAR]
         targetIdPar.startSection = True
         targetIdPar.readOnly = True
         targetIdPar.expr = f"me.storage['{RS_TARGET_ID_STORAGE_KEY}'] if '{RS_TARGET_ID_STORAGE_KEY}' in me.storage else ''"
+
+    def organizePars(self):
+
+        if "COMP" not in self.ownerComp.OPType:
+            return
+
+        page = self.ownerComp.customPages[RS_TARGET_INFO_PAGE]
+
+        configParNames = [RS_TARGET_ID_PAR, RS_BUNDLE_COMPLETE_PAR, *[p.safeName for p in self.pageTargets.values() if p.page.name != RS_TARGET_INFO_PAGE]]
+
+        for par in page.pars:
+            if par.name not in configParNames:
+                par.destroy()
+
+        page.sort(*configParNames)
+
+        if len(page.pars) > 2:
+            page.pars[1].startSection = True
+            page.pars[2].startSection = True
 
     def buildPageTargets(self):
         """
@@ -88,7 +105,60 @@ class OPTarget(TouchTarget):
             self.pageTargets[t.id] = t
 
     def getActions(self):
-        allActions = [actions for target in self.pageTargets.values() for actions in target.getActions()]
+
+        def bulk_set_action_handler(action: Action, data: Dict[str, any]):
+            # print(f"[OPTarget]: Handling bulk set action for {self.id}")
+            # print("Data received:", data)
+
+            for page in self.pageTargets.values():
+                for par in page.parGroupTargets.values():
+                    if par.parShape is None:
+                        continue
+
+                    if par.parGroup.name in data:
+                        value = data.get(par.parGroup.name, None)
+                        if value is None:
+                            print(f"Skipping {par.parGroup.name} on {page.name} as no value provided")
+                            continue
+                        par.parShape.setData(value)
+                    # print(f"Setting {par.parGroup.name} to {value} on {page.page.name}")
+            opCompletePulse = self.ownerComp.par[RS_BUNDLE_COMPLETE_PAR]
+            if not opCompletePulse.isPulse:
+                print(f"[OPTarget]: {RS_BUNDLE_COMPLETE_PAR} is not a pulse parameter, cannot pulse.")
+                return
+            opCompletePulse.pulse()
+            pass
+
+
+        properties = {}
+
+        for page in self.pageTargets.values():
+            for par in page.parGroupTargets.values():
+
+                properties[par.parGroup.name] = {
+                    "type": "object",
+                    "properties": par.parShape.buildSchemaProperties(),
+                }
+
+
+        schema = {
+            "type": "object",
+            "properties": properties,
+        }
+
+
+
+        bulk_set_action = Action(
+            id=f"{self.id}:bulk_set",
+            name="Bulk Set",
+            handler=bulk_set_action_handler,
+            targetId=self.id,
+            schema=schema,
+            serviceId=self.instance.serviceId
+        )
+
+
+        allActions = [actions for target in self.pageTargets.values() for actions in target.getActions()] + [bulk_set_action]
         return allActions
     
 

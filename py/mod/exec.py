@@ -97,7 +97,7 @@ class Machine(MItem):
         self.dnsName = name
         self.execName = name
         self.address = 'fakeAddress'
-
+        
 
 class Service(MItem):
     def __init__(self, id: str, name: str, systemTypeCode: str):
@@ -171,10 +171,10 @@ class SetAnswer(MCommand):
 # class that handles the cached version of the touch targets, instances, actions, etc for rocketship.
 class ExecClient:
     def __init__(self) -> None:
-        self.targets: Dict[str, Target] = {}
+        # self.targets: Dict[str, Target] = {}
         self.targetStatuses: Dict[str, TargetStatus] = {}
         self.actions: Dict[str, Action] = {}
-        self.emitters: Dict[str, Emitter] = {}
+        # self.emitters: Dict[str, Emitter] = {}
         self.handlers: Dict[str, callable] = {}
         self.clientId: str = None
         self.webRtcConnections: Dict[str, str] = {} # localConnectionId: remoteConnectionId
@@ -201,6 +201,7 @@ class ExecClient:
     def parseMessage(self, message):
         try:
             d = json.loads(message)
+
             if d['event'] == 'ws:m:command':
                 self.parseCommand(d['data'])
             if d['event'] == 'ws:m:query-response':
@@ -246,12 +247,19 @@ class ExecClient:
             self.handleExecTargetAction(c)
 
     def parseQueryResponse(self, data):
-            
-        handler = self.queryHandlers[data['tx']]
-        if handler:
-            handler(QueryResponse(data))
-        else:
-            self.log("No handler found for query tx: " + data['tx'])
+
+        tx = data.get('tx', None)
+        if not tx:
+            self.log("No tx in query response data")
+            return
+        
+
+
+        handler = self.queryHandlers.get(tx, None)
+        if not handler:
+            self.log("No handler found for query tx: " + tx)
+            return
+        handler(QueryResponse(data))
 
     def handleExecTargetAction(self, command: ExecTargetAction):
         if command.action.id in self.handlers:
@@ -259,7 +267,7 @@ class ExecClient:
             handler(command.action, command.data)
 
     def saveTarget(self, target: Target):
-        self.targets[target.id] = target
+        # self.targets[target.id] = target
         self.set(target)
 
     def setTargetOffline(self, targetId: str, instanceId: str):
@@ -276,15 +284,17 @@ class ExecClient:
             lastUpdated=datetime.now(timezone.utc).isoformat()
         )
 
-        self.targetStatuses[ts.id] = ts
+        # self.targetStatuses[ts.id] = ts
         self.set(ts)
+        if targetId == "dbc230dc-aa08-47ff-a0a3-3a429f9ef081:A":
+            print(f"SENDING SUBJECT {status}")        
 
     def saveAction(self, action: Action):
         self.actions[action.id] = action
         self.set(action)
 
     def saveEmitter(self, emitter: Emitter):
-        self.emitters[emitter.id] = emitter
+        # self.emitters[emitter.id] = emitter
         self.set(emitter)
 
     def pulseEmitter(self, emitterId: str, data: any):
@@ -296,16 +306,17 @@ class ExecClient:
         )
         self.set(p)
 
-    def removeTarget(self, targetId: str):
-        if targetId not in self.targets:
-            return
+    # def removeTarget(self, targetId: str):
+    #     pass
+        # if targetId not in self.targets:
+        #     return
 
-        del self.targets[targetId]
+        # del self.targets[targetId]
 
-		# find all actions related to this targetId
-        for actionId, action in self.actions.items():
-            if action.targetId == targetId:
-                self.removeHandler(actionId)
+		# # find all actions related to this targetId
+        # for actionId, action in self.actions.items():
+        #     if action.targetId == targetId:
+        #         self.removeHandler(actionId)
 
     def saveHandler(self, actionId: str, handler: Callable[[Action, Dict[str, any]], None]):
         self.handlers[actionId] = handler
@@ -318,4 +329,7 @@ class ExecClient:
 
 
 
-    
+
+
+
+CLIENT = ExecClient()

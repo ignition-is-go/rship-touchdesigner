@@ -10,8 +10,7 @@ Help: search "Extensions" in wiki
 from typing import Dict
 import TDFunctions as TDF
 import socket
-from exec import ExecClient, GetTargetsByServiceId, Instance, Machine, InstanceStatus, Status, Action, Emitter
-# from touch import makeOpTarget, cleanDeleted, pulseEmitter
+from exec import CLIENT, ExecClient, GetTargetsByServiceId, Instance, Machine, InstanceStatus, Status, Action, Emitter
 from handle_webrtc import init as initWebRTC, handle_on_answer, handle_on_ice_candidate
 from myko import QueryResponse
 from op_target import OPTarget
@@ -40,6 +39,7 @@ class ExecInfo:
 class RshipExt:
 
 	def __init__(self, ownerComp):
+		print("[RshipExt]: Initializing RshipExt...")
 		self.ownerComp = ownerComp
 		self.findTargetsOp = self.ownerComp.op('find_targets')
 		
@@ -49,9 +49,7 @@ class RshipExt:
 
 		self.targetsOp = self.ownerComp.op('path_and_pars')
 		
-		self.client = ExecClient()
-		self.client.setSend(self.websocketOp.sendText)
-
+		CLIENT.setSend(self.websocketOp.sendText)
 
 		self.OnProjectPreSave()
 
@@ -110,7 +108,6 @@ class RshipExt:
 
 		machineId = data.get('machineId', None)
 		connection = data.get('connectionStatus', None)
-		print("CONN", connection)
 		rshipUrl = connection.get('data', None) if connection else None
 
 		self.handleLinkRshipUrl(rshipUrl)
@@ -122,10 +119,23 @@ class RshipExt:
 # region WebSocket Callbacks
 
 	def targetListUpdated(self, data: QueryResponse):
-		for target in data.upserts:
-			if target.item['id'] not in self.allTouchTargets:
-				print(f"[RshipExt]: Remote target not found: {target.item['id']}")
-				self.client.setTargetOffline(target.item['id'], self.instance.id)
+
+		allKeys = set(self.allTouchTargets.keys())
+		remoteKeys = set([target.item['id'] for target in data.upserts])
+
+		# Find targets that are in the local list but not in the remote list
+		missingKeys = remoteKeys - allKeys
+
+		for key in missingKeys:
+			if key == "dbc230dc-aa08-47ff-a0a3-3a429f9ef081:A":
+				print("SENDING SUBJECT OFFLINE")	
+			print(f"[RshipExt]: Target {key} is missing from local list, setting offline")			
+			CLIENT.setTargetOffline(key, self.instance.id)
+
+		# for target in data.upserts:
+			# if target.item['id'] not in self.allTouchTargets:
+				# print(f"[RshipExt]: Remote target not found: {target.item['id']}")
+				# CLIENT.setTargetOffline(target.item['id'], self.instance.id)
 
 
 	def OnRshipConnect(self):
@@ -133,16 +143,24 @@ class RshipExt:
 		print("[RshipExt]: Connected to Rship Server at ", self.websocketOp.par.netaddress.eval())
 		initWebRTC(self.client)
 		self.refreshProjectData()
-		self.client.sendQuery(GetTargetsByServiceId(makeServiceId()), "Target", self.targetListUpdated)
+		CLIENT.sendQuery(GetTargetsByServiceId(makeServiceId()), "Target", self.targetListUpdated)
 
 
 	def OnRshipDisconnect(self):
 		self.wsConnected = False
 		print("[RshipExt]: Disconnected from Rship Server")
 
+
+	def OnRshipReceivePing(self):
+		if self.wsConnected is False:
+			self.wsConnected = True
+			self.refreshProjectData()
+			return
+		pass
+
 	def OnRshipReceiveText(self, text: str):
 		
-		self.client.parseMessage(text)
+		CLIENT.parseMessage(text)
 
 # endregion
 
@@ -184,11 +202,8 @@ class RshipExt:
 
 		port = int(port)
 
-		if self.ownerComp.par.Port.eval() == port and self.ownerComp.par.Address.eval() == rship_host and self.websocketOp.par.active.eval():
+		if self.ownerComp.par.Port.eval() == port and self.ownerComp.par.Address.eval() == rship_host and self.wsConnected:
 			print("[RshipExt]: Rship already connected to", rship_host, "on port", port)
-			print("[RshipExt]: Refreshing targets manuallly")
-			if not self.wsConnected:
-				self.ownerComp.par.Reconnect.pulse()
 			return
 
 		self.ownerComp.par.Port = port
@@ -243,13 +258,11 @@ class RshipExt:
 
 		self.allTouchTargets = {target.id: target for target in allTouchTargets}
 		print(f"[RshipExt]: Found {len(allTouchTargets)} TouchTargets in total")
-		print("all TouchTargets", self.allTouchTargets.keys())
-
-
+		# print("all TouchTargets", self.allTouchTargets.keys())
 
 	def updateLocalInstance(self): 
 
-		serviceId = makeServiceId();
+		serviceId = makeServiceId()
 
 		print(f"[RshipExt]: Updating local instance with service ID: {serviceId}")
 		print("machineId", self.MachineId)
@@ -278,11 +291,11 @@ class RshipExt:
 			print("[RshipExt]: Instance is not set, cannot send project data")
 			return
 		
-		if self.wsConnected is False:
-			print("[RshipExt]: Not connected to Rship Server, cannot send project data")
-			return
+		# if self.wsConnected is False:
+		# 	print("[RshipExt]: Not connected to Rship Server, cannot send project data")
+		# 	return
 
-		self.client.set(self.instance)
+		CLIENT.set(self.instance)
 
 
 		allTouchTargets = [child for target in self.opTargets.values() for child in target.collectChildren()]
@@ -294,14 +307,17 @@ class RshipExt:
 
 		for target in allTargets:
 			# print(f"[RshipExt]: Sending target {target.id} to server")
-			self.client.saveTarget(target)
-			self.client.setTargetStatus(target.id, self.instance.id, Status.Online)
+			CLIENT.saveTarget(target)
+			# print(f"[RshipExt]: Target {target.id} sent to server")
+			if target.id == "dbc230dc-aa08-47ff-a0a3-3a429f9ef081:A":
+				print("SENDING SUBJECT ONLINE")
+			CLIENT.setTargetStatus(target.id, self.instance.id, Status.Online)
 		
 		for action in allActions:
-			self.client.saveHandler(action.id, action.handler)
+			CLIENT.saveHandler(action.id, action.handler)
 			
 			del action.handler  # Remove handler from action to avoid circular references
-			self.client.saveAction(action)
+			CLIENT.saveAction(action)
 
 		for emitter in allEmitters:
 			self.emitterIndex[emitter.changeKey] = emitter
@@ -309,7 +325,7 @@ class RshipExt:
 			
 			del emitter.handler  # Remove handler from emitter to avoid circular references
 			del emitter.changeKey
-			self.client.saveEmitter(emitter)
+			CLIENT.saveEmitter(emitter)
 	
 
 		
@@ -338,7 +354,7 @@ class RshipExt:
 			print(f"[RshipExt]: No data returned from emitter handler for {changeKey}")
 			return
 		
-		self.client.pulseEmitter(emitter.id, data)
+		CLIENT.pulseEmitter(emitter.id, data)
 
 		# pulseEmitter(opPath, parName, self.client)
 

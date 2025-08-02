@@ -18,3 +18,10 @@ def makeServiceId():
 	serviceId = sections[0]
 
 	return serviceId
+
+
+RS_TARGET_INFO_PAGE = "Rship Target Config"
+RS_BUNDLE_COMPLETE_PAR = "Rshipparsupdated"
+RS_TARGET_ID_PAR = "Rshiptargetid"
+RS_TARGET_ID_STORAGE_KEY = 'rs_target_id'
+
