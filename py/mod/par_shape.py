@@ -89,9 +89,9 @@ class IntParShape(ParShape):
         properties = {}
         if self.parGroup.size > 1:
             for i in self.parGroup.subLabel:
-                properties[i] = {"type": "number"}
+                properties[i] = {"type": "integer"}
         else:
-            properties['value'] = {"type": "number"}
+            properties['value'] = {"type": "integer"}
         return properties
 
     def setData(self, data: Dict[str, any]):
