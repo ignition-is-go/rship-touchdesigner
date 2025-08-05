@@ -104,14 +104,19 @@ class RshipExt:
 
 		print("[RshipExt]: Exec Info received:", data)
 
-		data = json.loads(data)
+		try:
+			data = json.loads(data)
 
-		machineId = data.get('machineId', None)
-		connection = data.get('connectionStatus', None)
-		rshipUrl = connection.get('data', None) if connection else None
+			machineId = data.get('machineId', None)
+			connection = data.get('connectionStatus', None)
+			rshipUrl = connection.get('data', None) if connection else None
 
-		self.handleLinkRshipUrl(rshipUrl)
-		self.handleLinkMachineId(machineId)
+			self.handleLinkRshipUrl(rshipUrl)
+			self.handleLinkMachineId(machineId)
+		except: 
+			self.handleLinkMachineId(None)
+			self.handleLinkRshipUrl(None)
+
 		self.refreshProjectData()
 
 # endregion exec info
@@ -180,7 +185,8 @@ class RshipExt:
 
 		port = 5155
 
-		if rship_host is not None:
+		#TODO: handle empty string here
+		if rship_host is not None and rship_host != "":
 
 			sections = rship_host.split("://")
 
