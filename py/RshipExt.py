@@ -12,7 +12,7 @@ from typing import Dict
 import TDFunctions as TDF
 import socket
 from exec import CLIENT, ExecClient, GetTargetsByServiceId, Instance, Machine, InstanceStatus, Status, Action, Emitter
-from handle_webrtc import init as initWebRTC, handle_on_answer, handle_on_ice_candidate
+from handle_webrtc import init as initWebRTC, handle_on_answer, handle_on_ice_candidate, assertStream
 from myko import QueryResponse
 from op_target import OPTarget
 import json
@@ -147,7 +147,7 @@ class RshipExt:
 	def OnRshipConnect(self):
 		self.wsConnected = True
 		print("[RshipExt]: Connected to Rship Server at ", self.websocketOp.par.netaddress.eval())
-		initWebRTC(self.client)
+		initWebRTC(CLIENT)
 		self.refreshProjectData()
 		CLIENT.sendQuery(GetTargetsByServiceId(makeServiceId()), "Target", self.targetListUpdated)
 
@@ -309,6 +309,10 @@ class RshipExt:
 		CLIENT.set(self.instance)
 
 
+		for opTarget in self.opTargets.values():
+			assertStream(opTarget.id, opTarget.ownerComp, CLIENT)
+
+
 		allTouchTargets = [child for target in self.opTargets.values() for child in target.collectChildren()]
 
 		allTargets = [target.getTarget() for target in allTouchTargets]
@@ -372,11 +376,11 @@ class RshipExt:
 # region WebRTC Handlers
 
 	def HandleWebRTCAnswer(self, connectionId: str, localSdp: str):
-		handle_on_answer(connectionId, localSdp, self.client)
+		handle_on_answer(connectionId, localSdp, CLIENT)
 
 
 	def HandleWebRTCIceCandidate(self, connectionId: str, candidate: str, sdpMid: str, lineIndex: int):
-		handle_on_ice_candidate(connectionId, candidate, sdpMid, lineIndex, self.client)
+		handle_on_ice_candidate(connectionId, candidate, sdpMid, lineIndex, CLIENT)
 
 # endregion WebRTC Handlers
 

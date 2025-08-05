@@ -41,9 +41,8 @@ def handleConnectionQuery(data: QueryResponse):
 			local_id = remote_to_local_map[remote_id]
 			cleanup_connection(local_id)
 
-
 	for upsert in upserts:
-		remote_id = upsert.item.id
+		remote_id = upsert.item['id']
 		stream_id = upsert.item['streamId']
 
 		if stream_id not in stream_sources:
