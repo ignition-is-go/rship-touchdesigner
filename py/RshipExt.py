@@ -7,6 +7,7 @@ can be accessed externally, e.g. op('yourComp').PromotedFunction().
 
 Help: search "Extensions" in wiki
 """
+import datetime
 from typing import Dict
 import TDFunctions as TDF
 import socket
@@ -157,10 +158,14 @@ class RshipExt:
 
 
 	def OnRshipReceivePing(self):
+		self.ownerComp.par.Lastping = datetime.datetime.now()
+		
 		if self.wsConnected is False:
 			self.wsConnected = True
 			self.refreshProjectData()
+
 			return
+		
 		pass
 
 	def OnRshipReceiveText(self, text: str):
