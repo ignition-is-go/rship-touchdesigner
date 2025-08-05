@@ -145,7 +145,7 @@ class PulseParShape(ParShape):
         return {'value': None}
 
     def buildSchemaProperties(self) -> Dict[str, any]:
-        return None
+        return {'value': {"type": "null"}}
 
     def setData(self, data: Dict[str, any]):
         self.ownerComp.par[self.parGroup.name].pulse()
