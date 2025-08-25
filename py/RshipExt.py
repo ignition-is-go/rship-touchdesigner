@@ -8,7 +8,7 @@ can be accessed externally, e.g. op('yourComp').PromotedFunction().
 Help: search "Extensions" in wiki
 """
 import datetime
-from typing import Dict
+from typing import Dict, Set
 
 import TDFunctions as TDF
 import socket
@@ -53,7 +53,7 @@ class RshipExt:
 		
 		CLIENT.setSend(self.websocketOp.sendText)
 
-		self.OnProjectPreSave()
+		# self.OnProjectPreSave()
 
 		TDF.createProperty(self, 'MachineId', value=None, dependable=True,
 						   readOnly=False)
@@ -74,6 +74,8 @@ class RshipExt:
 
 		self.reconnectTimerOp.par.start.pulse()
 
+		self.remoteKeys: Set[str] = set()
+
 
 	@property
 	def ConnectionStatus(self):
@@ -83,6 +85,7 @@ class RshipExt:
 	def OnProjectPreSave(self):
 		self.cookTargetList()
 		self.updateExecInfo()
+		self.refreshProjectData()
 
 
 # region exec info 
@@ -123,7 +126,7 @@ class RshipExt:
 			self.handleLinkMachineId(None)
 			self.handleLinkRshipUrl(None)
 
-		self.refreshProjectData()
+		# self.refreshProjectData()
 
 # endregion exec info
 
@@ -131,20 +134,34 @@ class RshipExt:
 
 	def targetListUpdated(self, data: QueryResponse):
 
-		allKeys = set(self.allTouchTargets.keys())
+		
+
 		remoteKeys = set([target.item['id'] for target in data.upserts])
 
-		# Find targets that are in the local list but not in the remote list
-		missingKeys = remoteKeys - allKeys
+		for key in remoteKeys:
+			self.remoteKeys.add(key)
 
-		for key in missingKeys:
-			print(f"[RshipExt]: Target {key} is missing from local list, setting offline")			
-			CLIENT.setTargetOffline(key, self.instance.id)
+
+		for key in data.deletes:
+			self.remoteKeys.discard(key)
+
+
+		self.setMissingOffline()
+
+		# Find targets that are in the local list but not in the remote list
 
 		# for target in data.upserts:
 			# if target.item['id'] not in self.allTouchTargets:
 				# print(f"[RshipExt]: Remote target not found: {target.item['id']}")
 				# CLIENT.setTargetOffline(target.item['id'], self.instance.id)
+	
+	def setMissingOffline(self):
+		allKeys = set(self.allTouchTargets.keys())
+		missingKeys = self.remoteKeys - allKeys
+
+		for key in missingKeys:
+			print(f"[RshipExt]: Target {key} is missing from local list, setting offline")			
+			CLIENT.setTargetOffline(key, self.instance.id)
 
 
 	def OnRshipConnect(self):
@@ -322,6 +339,8 @@ class RshipExt:
 		allActions = [action for target in allTouchTargets for action in target.getActions()]
 		allEmitters = [emitter for target in allTouchTargets for emitter in target.getEmitters()]
 
+		self.allTouchTargets = {target.id: target for target in allTouchTargets}
+
 
 		for target in allTargets:
 			# print(f"[RshipExt]: Sending target {target.id} to server")
@@ -342,6 +361,8 @@ class RshipExt:
 			del emitter.handler  # Remove handler from emitter to avoid circular references
 			del emitter.changeKey
 			CLIENT.saveEmitter(emitter)
+
+		self.setMissingOffline()
 	
 
 		
