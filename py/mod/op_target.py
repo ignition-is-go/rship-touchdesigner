@@ -43,7 +43,7 @@ class OPTarget(TouchTarget):
         # print("[OPTarget]: OpType is " + self.ownerComp.OPType)
 
         if "COMP" not in self.ownerComp.OPType:
-            print(f"[OPTarget]: {self.ownerComp.path} [{self.ownerComp.OPType}] is not a COMP - skipping util pars creation.")
+            # print(f"[OPTarget]: {self.ownerComp.path} [{self.ownerComp.OPType}] is not a COMP - skipping util pars creation.")
             return
 
         if RS_TARGET_INFO_PAGE not in self.ownerComp.customPages:
@@ -118,7 +118,7 @@ class OPTarget(TouchTarget):
                     if par.parGroup.name in data:
                         value = data.get(par.parGroup.name, None)
                         if value is None:
-                            print(f"Skipping {par.parGroup.name} on {page.name} as no value provided")
+                            # print(f"Skipping {par.parGroup.name} on {page.name} as no value provided")
                             continue
                         par.parShape.setData(value)
                     # print(f"Setting {par.parGroup.name} to {value} on {page.page.name}")

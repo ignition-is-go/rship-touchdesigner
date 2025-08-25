@@ -9,6 +9,7 @@ Help: search "Extensions" in wiki
 """
 import datetime
 from typing import Dict
+
 import TDFunctions as TDF
 import socket
 from exec import CLIENT, ExecClient, GetTargetsByServiceId, Instance, Machine, InstanceStatus, Status, Action, Emitter
@@ -18,7 +19,7 @@ from op_target import OPTarget
 import json
 
 from target import TouchTarget
-from util import makeEmitterChangeKey, makeServiceId
+from util import makeEmitterChangeKey
 
 # region ExecInfo
 
@@ -69,6 +70,10 @@ class RshipExt:
 		self.emitterIndex: Dict[str, Emitter] = {}
 		self.emitterHandlers: Dict[str, callable] = {}
 
+		self.reconnectTimerOp = self.ownerComp.op('reconnect_timer')
+
+		self.reconnectTimerOp.par.start.pulse()
+
 
 	@property
 	def ConnectionStatus(self):
@@ -82,11 +87,11 @@ class RshipExt:
 
 # region exec info 
 	def updateExecInfo(self):
-		print("[RshipExt]: Updating Exec Info from Rship Link...")
+		# print("[RshipExt]: Updating Exec Info from Rship Link...")
 		self.execInfoOp.par.request.pulse()
 
 	def OnExecInfoClientConnect(self, requestId: str):
-		print("[RshipExt]: Exec Info Client connected with request ID:", requestId)
+		# print("[RshipExt]: Exec Info Client connected with request ID:", requestId)
 		self.execInfoRequests[requestId] = True
 
 	def OnExecInfoClientDisconnect(self, requestId: str):
@@ -96,14 +101,14 @@ class RshipExt:
 			self.handleLinkMachineId(None)
 			self.handleLinkRshipUrl(None)
 
-			print("[RshipExt]: Refreshing project data")
+			# print("[RshipExt]: Refreshing project data")
 			self.refreshProjectData()
 
 	def OnExecInfoUpdate(self, data: ExecInfo, requestId: str):
 		if requestId in self.execInfoRequests:
 			del self.execInfoRequests[requestId]
 
-		print("[RshipExt]: Exec Info received:", data)
+		# print("[RshipExt]: Exec Info received:", data)
 
 		try:
 			data = json.loads(data)
@@ -133,8 +138,6 @@ class RshipExt:
 		missingKeys = remoteKeys - allKeys
 
 		for key in missingKeys:
-			if key == "dbc230dc-aa08-47ff-a0a3-3a429f9ef081:A":
-				print("SENDING SUBJECT OFFLINE")	
 			print(f"[RshipExt]: Target {key} is missing from local list, setting offline")			
 			CLIENT.setTargetOffline(key, self.instance.id)
 
@@ -149,7 +152,7 @@ class RshipExt:
 		print("[RshipExt]: Connected to Rship Server at ", self.websocketOp.par.netaddress.eval())
 		initWebRTC(CLIENT)
 		self.refreshProjectData()
-		CLIENT.sendQuery(GetTargetsByServiceId(makeServiceId()), "Target", self.targetListUpdated)
+		CLIENT.sendQuery(GetTargetsByServiceId(self.makeServiceId()), "Target", self.targetListUpdated)
 
 
 	def OnRshipDisconnect(self):
@@ -177,7 +180,6 @@ class RshipExt:
 # region exec info handlers
 
 	def handleLinkMachineId(self, machineId: str | None):
-		print("MACHINE", machineId)
 		if machineId is None or machineId == "":
 			hostname = socket.gethostname()
 			print("[RshipExt]: Machine Id not provided, using fallback", hostname)
@@ -214,12 +216,12 @@ class RshipExt:
 		port = int(port)
 
 		if self.ownerComp.par.Port.eval() == port and self.ownerComp.par.Address.eval() == rship_host and self.wsConnected:
-			print("[RshipExt]: Rship already connected to", rship_host, "on port", port)
+			# print("[RshipExt]: Rship already connected to", rship_host, "on port", port)
 			return
 
 		self.ownerComp.par.Port = port
 		self.ownerComp.par.Address = rship_host
-		print("[RshipExt]: Setting Rship host to", rship_host, "on port", port)
+		# print("[RshipExt]: Setting Rship host to", rship_host, "on port", port)
 
 
 		# since machineId is coming from the Rship Link, we need not send the machine info
@@ -231,7 +233,8 @@ class RshipExt:
 		if self.wsConnected:
 			self.sendProjectData()
 		else:
-			print("[RshipExt]: Not connected to Rship Server, cannot send project data")
+			print("[RshipExt]: Not connected to Rship Server, Attempting to reconnect")
+			self.ownerComp.par.Reconnect.pulse()
 
 # endregion
 
@@ -240,17 +243,17 @@ class RshipExt:
 
 
 	def cookTargetList(self):
-		print("[RshipExt]: Finding OpTargets...")
+		# print("[RshipExt]: Finding OpTargets...")
 		self.findTargetsOp.cook(force=True)
 		
 
 	def buildTargets(self):
 
-		print("[RshipExt]: Building targets...")
+		# print("[RshipExt]: Building targets...")
 
 		ops = [op(self.targetsOp[i, 0].val) for i in range(0, self.targetsOp.numRows)]
 
-		print("[RshipExt]: Found", len(ops), "ops")
+		# print("[RshipExt]: Found", len(ops), "ops")
 
 		foundOps: Dict[str, OPTarget] = {}
 
@@ -268,15 +271,15 @@ class RshipExt:
 		allTouchTargets = [child for target in self.opTargets.values() for child in target.collectChildren()]
 
 		self.allTouchTargets = {target.id: target for target in allTouchTargets}
-		print(f"[RshipExt]: Found {len(allTouchTargets)} TouchTargets in total")
+		# print(f"[RshipExt]: Found {len(allTouchTargets)} TouchTargets in total")
 		# print("all TouchTargets", self.allTouchTargets.keys())
 
 	def updateLocalInstance(self): 
 
-		serviceId = makeServiceId()
+		serviceId = self.makeServiceId()
 
-		print(f"[RshipExt]: Updating local instance with service ID: {serviceId}")
-		print("machineId", self.MachineId)
+		# print(f"[RshipExt]: Updating local instance with service ID: {serviceId}")
+		# print("machineId", self.MachineId)
 
 
 		instance = Instance(
@@ -290,7 +293,7 @@ class RshipExt:
 		)
 
 		self.instance = instance
-		print(f"[RshipExt]: Local Instance updated:\n  ID: {instance.id},\n  Name: {instance.name}")
+		# print(f"[RshipExt]: Local Instance updated:\n  ID: {instance.id},\n  Name: {instance.name}")
 
 
 # endregion
@@ -324,8 +327,6 @@ class RshipExt:
 			# print(f"[RshipExt]: Sending target {target.id} to server")
 			CLIENT.saveTarget(target)
 			# print(f"[RshipExt]: Target {target.id} sent to server")
-			if target.id == "dbc230dc-aa08-47ff-a0a3-3a429f9ef081:A":
-				print("SENDING SUBJECT ONLINE")
 			CLIENT.setTargetStatus(target.id, self.instance.id, Status.Online)
 		
 		for action in allActions:
@@ -350,7 +351,7 @@ class RshipExt:
 
 		emitter = self.emitterIndex.get(changeKey, None)
 		if emitter is None:
-			print(f"[RshipExt]: No emitter found for change key {changeKey}")
+			# print(f"[RshipExt]: No emitter found for change key {changeKey}")
 			return
 		
 
@@ -359,14 +360,14 @@ class RshipExt:
 
 
 		if handler is None:
-			print(f"[RshipExt]: No handler found for emitter {changeKey}")
+			# print(f"[RshipExt]: No handler found for emitter {changeKey}")
 			return
 		
 
 		data = handler()
 
 		if data is None:
-			print(f"[RshipExt]: No data returned from emitter handler for {changeKey}")
+			# print(f"[RshipExt]: No data returned from emitter handler for {changeKey}")
 			return
 		
 		CLIENT.pulseEmitter(emitter.id, data)
@@ -381,6 +382,19 @@ class RshipExt:
 
 	def HandleWebRTCIceCandidate(self, connectionId: str, candidate: str, sdpMid: str, lineIndex: int):
 		handle_on_ice_candidate(connectionId, candidate, sdpMid, lineIndex, CLIENT)
+
+	def makeServiceId(self):
+
+		override = self.ownerComp.par.Serviceidoverride.eval()
+		if(override is not None and override != ""):
+			return override
+
+		projectfile = project.name
+		sections = projectfile.split(".")
+		
+		serviceId = sections[0]
+
+		return serviceId
 
 # endregion WebRTC Handlers
 

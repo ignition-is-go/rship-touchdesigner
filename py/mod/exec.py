@@ -286,8 +286,6 @@ class ExecClient:
 
         # self.targetStatuses[ts.id] = ts
         self.set(ts)
-        if targetId == "dbc230dc-aa08-47ff-a0a3-3a429f9ef081:A":
-            print(f"SENDING SUBJECT {status}")        
 
     def saveAction(self, action: Action):
         self.actions[action.id] = action

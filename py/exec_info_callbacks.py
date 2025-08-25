@@ -7,16 +7,16 @@
 
 
 def onConnect(webClientDAT, id):
-	me.ext.RshipExt.OnExecInfoClientConnect(id)
+	me.parent().ext.RshipExt.OnExecInfoClientConnect(id)
 	return
 	
 def onDisconnect(webClientDAT, id):
-	me.ext.RshipExt.OnExecInfoClientDisconnect(id)
+	me.parent().ext.RshipExt.OnExecInfoClientDisconnect(id)
 	return
 
 def onResponse(webClientDAT, statusCode, headerDict, data, id):
 	decoded = data.decode('utf-8')
 
-	me.ext.RshipExt.OnExecInfoUpdate(decoded, id)
+	me.parent().ext.RshipExt.OnExecInfoUpdate(decoded, id)
 	return
 	

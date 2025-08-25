@@ -122,7 +122,7 @@ class PageTarget(TouchTarget):
         Generates utility parameters for this page target.
         """
         if "COMP" not in self.ownerComp.OPType:
-            print(f"[OPTarget]: {self.ownerComp.path} [{self.ownerComp.OPType}] is not a COMP - skipping page util pars creation.")
+            # print(f"[OPTarget]: {self.ownerComp.path} [{self.ownerComp.OPType}] is not a COMP - skipping page util pars creation.")
             return
         
         page = self.ownerComp.customPages[RS_TARGET_INFO_PAGE]

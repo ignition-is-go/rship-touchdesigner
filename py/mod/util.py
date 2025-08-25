@@ -11,13 +11,7 @@ def makeEmitterChangeKey(op, parName):
 	return f"{op.path}.{parName}"
 
 
-def makeServiceId():
-	projectfile = project.name
-	sections = projectfile.split(".")
-	
-	serviceId = sections[0]
 
-	return serviceId
 
 
 RS_TARGET_INFO_PAGE = "Rship Target Config"
