@@ -257,7 +257,7 @@ class ExecClient:
 
         handler = self.queryHandlers.get(tx, None)
         if not handler:
-            self.log("No handler found for query tx: " + tx)
+            # self.log("No handler found for query tx: " + tx)
             return
         handler(QueryResponse(data))
 

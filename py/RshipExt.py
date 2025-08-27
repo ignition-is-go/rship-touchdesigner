@@ -85,7 +85,7 @@ class RshipExt:
 	def OnProjectPreSave(self):
 		self.cookTargetList()
 		self.updateExecInfo()
-		self.refreshProjectData()
+		# self.refreshProjectData()
 
 
 # region exec info 
@@ -126,7 +126,7 @@ class RshipExt:
 			self.handleLinkMachineId(None)
 			self.handleLinkRshipUrl(None)
 
-		# self.refreshProjectData()
+		self.refreshProjectData()
 
 # endregion exec info
 
@@ -160,7 +160,7 @@ class RshipExt:
 		missingKeys = self.remoteKeys - allKeys
 
 		for key in missingKeys:
-			print(f"[RshipExt]: Target {key} is missing from local list, setting offline")			
+			# print(f"[RshipExt]: Target {key} is missing from local list, setting offline")			
 			CLIENT.setTargetOffline(key, self.instance.id)
 
 
@@ -168,7 +168,7 @@ class RshipExt:
 		self.wsConnected = True
 		print("[RshipExt]: Connected to Rship Server at ", self.websocketOp.par.netaddress.eval())
 		initWebRTC(CLIENT)
-		self.refreshProjectData()
+		self.refreshProjectData(sendEmitterValues=True)
 		CLIENT.sendQuery(GetTargetsByServiceId(self.makeServiceId()), "Target", self.targetListUpdated)
 
 
@@ -191,6 +191,12 @@ class RshipExt:
 	def OnRshipReceiveText(self, text: str):
 		
 		CLIENT.parseMessage(text)
+
+
+	def OnTickInterval(self):
+		if self.wsConnected is False:
+			self.updateExecInfo()		
+
 
 # endregion
 
@@ -243,12 +249,12 @@ class RshipExt:
 
 		# since machineId is coming from the Rship Link, we need not send the machine info
 
-	def refreshProjectData(self):
+	def refreshProjectData(self, sendEmitterValues=False):
 		self.updateLocalInstance()
 		self.buildTargets()
 
 		if self.wsConnected:
-			self.sendProjectData()
+			self.sendProjectData(sendEmitterValues=sendEmitterValues)
 		else:
 			print("[RshipExt]: Not connected to Rship Server, Attempting to reconnect")
 			self.ownerComp.par.Reconnect.pulse()
@@ -266,7 +272,7 @@ class RshipExt:
 
 	def buildTargets(self):
 
-		# print("[RshipExt]: Building targets...")
+		print("[RshipExt]: Building targets...")
 
 		ops = [op(self.targetsOp[i, 0].val) for i in range(0, self.targetsOp.numRows)]
 
@@ -317,7 +323,7 @@ class RshipExt:
 
 # ws senders
 
-	def sendProjectData(self):
+	def sendProjectData(self, sendEmitterValues = False):
 		if self.instance is None:
 			print("[RshipExt]: Instance is not set, cannot send project data")
 			return
@@ -334,6 +340,7 @@ class RshipExt:
 
 
 		allTouchTargets = [child for target in self.opTargets.values() for child in target.collectChildren()]
+
 
 		allTargets = [target.getTarget() for target in allTouchTargets]
 		allActions = [action for target in allTouchTargets for action in target.getActions()]
@@ -363,9 +370,13 @@ class RshipExt:
 			CLIENT.saveEmitter(emitter)
 
 		self.setMissingOffline()
-	
 
-		
+		for [key, handler] in self.emitterHandlers.items():
+			emitter = self.emitterIndex.get(key, None)
+			if emitter is not None and handler is not None and sendEmitterValues:
+				data = handler()
+				print("Pulse!")
+				CLIENT.pulseEmitter(emitter.id, data)
 
 	def PulseEmitter(self, opPath: str, parName: str):
 		changeKey = makeEmitterChangeKey(opPath, parName)

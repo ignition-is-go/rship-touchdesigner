@@ -61,7 +61,7 @@ def onCycleEndAlert(timerOp, segment, cycle, alertSegment, alertDone, interrupt)
 	return
 	
 def onCycle(timerOp, segment, cycle):
-	me.parent().ext.RshipExt.updateExecInfo()
+	me.parent().ext.RshipExt.OnTickInterval()
 	return
 
 def onDone(timerOp, segment, interrupt):

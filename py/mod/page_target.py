@@ -97,20 +97,16 @@ class PageTarget(TouchTarget):
             serviceId=self.instance.serviceId
         )
 
-
-
-
-        allActions = [bulk_set_action] +  [action for parGroup in self.parGroupTargets.values() for action in parGroup.getActions()]
+        allActions = [bulk_set_action] 
         return allActions
 
     def getEmitters(self) -> List[Emitter]:
         """
         Returns a list of emitters that can be used with this target.
         """
-        allEmitters = [emitter for parGroup in self.parGroupTargets.values() for emitter in parGroup.getEmitters()]
+        allEmitters = []
         return allEmitters
     
-
     def buildParGroupTargets(self):
         for par in self.page.parGroups:
             t = ParGroupTarget(self.id, self.parentId, self.ownerComp, par, self.instance)

@@ -35,6 +35,8 @@ class OPTarget(TouchTarget):
         print("[OPTarget]: Regenerating target ID...")
         newId = str(uuid4())
         self.ownerComp.storage[RS_TARGET_ID_STORAGE_KEY] = newId
+        self.pageTargets = {}
+        self.buildPageTargets()
         return newId
     
 
@@ -158,12 +160,12 @@ class OPTarget(TouchTarget):
         )
 
 
-        allActions = [actions for target in self.pageTargets.values() for actions in target.getActions()] + [bulk_set_action]
+        allActions = [bulk_set_action]
         return allActions
     
 
     def getEmitters(self):
-        allEmitters = [emitters for target in self.pageTargets.values() for emitters in target.getEmitters()]
+        allEmitters = []
         return allEmitters
 
     def getTarget(self):
