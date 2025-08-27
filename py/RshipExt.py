@@ -120,13 +120,14 @@ class RshipExt:
 			connection = data.get('connectionStatus', None)
 			rshipUrl = connection.get('data', None) if connection else None
 
-			self.handleLinkRshipUrl(rshipUrl)
-			self.handleLinkMachineId(machineId)
-		except: 
+			changed = self.handleLinkRshipUrl(rshipUrl)
+			changed |= self.handleLinkMachineId(machineId)
+			if changed:
+				self.refreshProjectData()
+		except:
 			self.handleLinkMachineId(None)
 			self.handleLinkRshipUrl(None)
 
-		self.refreshProjectData()
 
 # endregion exec info
 
@@ -189,29 +190,30 @@ class RshipExt:
 		pass
 
 	def OnRshipReceiveText(self, text: str):
-		
 		CLIENT.parseMessage(text)
 
 
 	def OnTickInterval(self):
-		if self.wsConnected is False:
-			self.updateExecInfo()		
+		self.updateExecInfo()		
 
 
 # endregion
 
 # region exec info handlers
 
-	def handleLinkMachineId(self, machineId: str | None):
+	def handleLinkMachineId(self, machineId: str | None) -> bool:
 		if machineId is None or machineId == "":
 			hostname = socket.gethostname()
 			print("[RshipExt]: Machine Id not provided, using fallback", hostname)
 			self.MachineId = hostname  # Fallback to hostname if not set
 			return
 		
-		self.MachineId = machineId
 
-	def handleLinkRshipUrl(self, rship_host: str | None):
+		changed = self.MachineId != machineId
+		self.MachineId = machineId
+		return changed
+
+	def handleLinkRshipUrl(self, rship_host: str | None) -> bool:
 
 		port = 5155
 
@@ -237,16 +239,18 @@ class RshipExt:
 
 
 		port = int(port)
+		changed = self.ownerComp.par.Port.eval() != port or self.ownerComp.par.Address.eval() != rship_host
 
-		if self.ownerComp.par.Port.eval() == port and self.ownerComp.par.Address.eval() == rship_host and self.wsConnected:
+		if not changed and self.wsConnected:
 			# print("[RshipExt]: Rship already connected to", rship_host, "on port", port)
-			return
+			return False
+
 
 		self.ownerComp.par.Port = port
 		self.ownerComp.par.Address = rship_host
 		# print("[RshipExt]: Setting Rship host to", rship_host, "on port", port)
 
-
+		return True
 		# since machineId is coming from the Rship Link, we need not send the machine info
 
 	def refreshProjectData(self, sendEmitterValues=False):
