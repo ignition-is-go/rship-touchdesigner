@@ -272,7 +272,7 @@ class RshipExt:
 
 	def buildTargets(self):
 
-		print("[RshipExt]: Building targets...")
+		# print("[RshipExt]: Building targets...")
 
 		ops = [op(self.targetsOp[i, 0].val) for i in range(0, self.targetsOp.numRows)]
 
@@ -375,7 +375,6 @@ class RshipExt:
 			emitter = self.emitterIndex.get(key, None)
 			if emitter is not None and handler is not None and sendEmitterValues:
 				data = handler()
-				print("Pulse!")
 				CLIENT.pulseEmitter(emitter.id, data)
 
 	def PulseEmitter(self, opPath: str, parName: str):
