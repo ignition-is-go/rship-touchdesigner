@@ -124,7 +124,8 @@ class RshipExt:
 			changed |= self.handleLinkMachineId(machineId)
 			if changed:
 				self.refreshProjectData()
-		except:
+		except Exception as e:
+			print("[RshipExt]: Error occurred while processing Exec Info:", e)
 			self.handleLinkMachineId(None)
 			self.handleLinkRshipUrl(None)
 

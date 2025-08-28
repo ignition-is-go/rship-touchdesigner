@@ -64,6 +64,7 @@ class Pulse(MItem):
 
         self.emitterId = emitterId
         self.data = data
+        self.hash = str(uuid4())
 
 
 class InstanceStatus(Enum):

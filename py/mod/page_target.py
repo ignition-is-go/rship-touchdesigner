@@ -17,7 +17,7 @@ class PageTarget(TouchTarget):
         # print(f"[PageTarget]: Initializing PageTarget for {self.page.name} at {self.ownerComp.path}")
 
         self.buildParGroupTargets()
-        self.safeName = f"Rship{self.page.name.replace(' ', '').lower()}updated"
+        self.bulkUpdatedName = f"Rship{self.page.name.replace(' ', '').lower()}updated"
         self.generateUtilPars()
 
     
@@ -64,9 +64,9 @@ class PageTarget(TouchTarget):
                         continue
                     par.parShape.setData(value)
                 # print(f"Setting {par.parGroup.name} to {value} on {self.page.name}")
-            opCompletePulse = self.ownerComp.par[self.safeName]
+            opCompletePulse = self.ownerComp.par[self.bulkUpdatedName]
             if not opCompletePulse.isPulse:
-                print(f"[PageTarget]: {self.safeName} is not a pulse parameter, cannot pulse.")
+                print(f"[PageTarget]: {self.bulkUpdatedName} is not a pulse parameter, cannot pulse.")
                 return
             opCompletePulse.pulse()
             pass
@@ -129,7 +129,5 @@ class PageTarget(TouchTarget):
         
 
     
-        page.appendPulse(self.safeName, label=f"{self.page.name} Page Updated")
+        page.appendPulse(self.bulkUpdatedName, label=f"{self.page.name} Page Updated")
         # Create utility parameters for the page
-        
-    

@@ -1,10 +1,10 @@
 from datetime import datetime, timezone
-from exec import Target, TargetStatus, Action, Emitter, Instance
+from exec import Target, Action, Emitter, Instance
 from typing import Dict, List
-from par_shape import ParShape, buildShape
-from abc import ABC, abstractmethod
+from par_shape import buildShape
 from target import TouchTarget
 from util import makeEmitterChangeKey
+from exec import CLIENT
 
 class ParGroupTarget(TouchTarget):
     def __init__(self, parentId: str, opTargetId: str,  ownerComp: OP, parGroup: ParGroup, instance: Instance):
@@ -15,7 +15,6 @@ class ParGroupTarget(TouchTarget):
         self.opTargetId = opTargetId
         self.parGroup = parGroup
         self.parShape = buildShape( ownerComp, parGroup)
-        self
         # print(f"[ParGroupTarget]: Initializing ParGroupTarget for {self.parGroup.name} at {self.ownerComp.path}")
 
         # print("SCHEMA", self.parShape.buildSchemaProperties())
@@ -64,7 +63,21 @@ class ParGroupTarget(TouchTarget):
             handler=handleSetAction
         )
 
-        return [setAction]
+        def handleResendAction(action: Action, data: Dict[str, any]):
+            CLIENT.pulseEmitter(f"{self.id}:updated", self.parShape.buildData())
+            return
+        
+
+        resendAction = Action(
+            id=f"{self.id}:resend",
+            name=f"Resend {self.parGroup.name}",
+            targetId=self.id,
+            schema=None,
+            serviceId=self.instance.serviceId,
+            handler=handleResendAction
+        )
+
+        return [setAction, resendAction]
 
     def getEmitters(self) -> List[Emitter]:
         """
@@ -75,9 +88,6 @@ class ParGroupTarget(TouchTarget):
             "type": "object",
             "properties": self.parShape.buildSchemaProperties()
         }
-
-
-
 
         setEmitter = Emitter(
             id=f"{self.id}:updated",

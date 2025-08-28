@@ -1,7 +1,7 @@
 from datetime import datetime, timezone
 from uuid import uuid4
 from page_target import PageTarget
-from typing import Dict, List, Optional
+from typing import Dict, List
 from target import TouchTarget
 from exec import Action, Target,Instance
 from util import RS_BUNDLE_COMPLETE_PAR, RS_TARGET_ID_PAR, RS_TARGET_ID_STORAGE_KEY, RS_TARGET_INFO_PAGE
@@ -75,7 +75,7 @@ class OPTarget(TouchTarget):
 
         page = self.ownerComp.customPages[RS_TARGET_INFO_PAGE]
 
-        configParNames = [RS_TARGET_ID_PAR, RS_BUNDLE_COMPLETE_PAR, *[p.safeName for p in self.pageTargets.values() if p.page.name != RS_TARGET_INFO_PAGE]]
+        configParNames = [RS_TARGET_ID_PAR, RS_BUNDLE_COMPLETE_PAR, *[p.bulkUpdatedName for p in self.pageTargets.values() if p.page.name != RS_TARGET_INFO_PAGE]]
 
         for par in page.pars:
             if par.name not in configParNames:
