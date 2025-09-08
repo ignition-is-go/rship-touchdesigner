@@ -76,7 +76,7 @@ def assertStream(targetId: str, operator: OP, client: ExecClient):
 
 	client.set(Stream(
 		id=stream_id,
-		name=operator.path,
+		name=operator.name,
 		type='webrtc'
 	))
 
