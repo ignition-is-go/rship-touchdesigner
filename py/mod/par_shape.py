@@ -21,7 +21,7 @@ class ParShape(ABC):
     
 
     @abstractmethod
-    def setData(self, data: Dict[str, any]):
+    def setData(self, data: Dict[str, any]) -> bool:
         """
         Sets the data for this ParShape.
         """
@@ -436,13 +436,17 @@ class SequenceParShape(ParShape):
 
     def buildData(self) -> Dict[str, any]:
         # Sequence data structure can be customized as needed
-        return {'blocks': [block for block in self.parGroup.blocks]}
+        return {'blocks': len(self.parGroup.sequence.blocks)}
 
     def buildSchemaProperties(self) -> Dict[str, any]:
         # Schema for sequence can be customized as needed
-        return {'blocks': {"type": "array"}}
+        return {'blocks': {"type": "number"}}
 
     def setData(self, data: Dict[str, any]):
+        self.parGroup.sequence.insertBlock(len(self.parGroup.sequence.blocks))
+        self.parGroup.sequence.numBlocks = data.get('blocks', 0)
+        op.RSHIP.ext.RshipExt.refreshProjectData()
+
         # Implement logic to set sequence data if needed
         pass
 

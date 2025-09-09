@@ -8,7 +8,7 @@ can be accessed externally, e.g. op('yourComp').PromotedFunction().
 Help: search "Extensions" in wiki
 """
 import datetime
-from typing import Dict, Set
+from typing import Dict, Set, Callable
 
 import TDFunctions as TDF
 import socket
@@ -68,7 +68,7 @@ class RshipExt:
 		self.instance: Instance | None = None
 
 		self.emitterIndex: Dict[str, Emitter] = {}
-		self.emitterHandlers: Dict[str, callable] = {}
+		self.emitterHandlers: Dict[str, Callable] = {}
 
 		self.reconnectTimerOp = self.ownerComp.op('reconnect_timer')
 
@@ -376,11 +376,15 @@ class RshipExt:
 
 		self.setMissingOffline()
 
-		for [key, handler] in self.emitterHandlers.items():
+		if not sendEmitterValues:
+			return
+
+		for key, handler in self.emitterHandlers.items():
 			emitter = self.emitterIndex.get(key, None)
-			if emitter is not None and handler is not None and sendEmitterValues:
+			if (emitter is not None) and (handler is not None):
 				data = handler()
 				CLIENT.pulseEmitter(emitter.id, data)
+
 
 	def PulseEmitter(self, opPath: str, parName: str):
 		changeKey = makeEmitterChangeKey(opPath, parName)
