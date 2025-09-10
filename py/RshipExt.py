@@ -341,7 +341,7 @@ class RshipExt:
 
 
 		for opTarget in self.opTargets.values():
-			assertStream(opTarget.id, opTarget.ownerComp, CLIENT)
+			assertStream(opTarget.id, self.instance.id, opTarget.ownerComp, CLIENT)
 
 
 		allTouchTargets = [child for target in self.opTargets.values() for child in target.collectChildren()]

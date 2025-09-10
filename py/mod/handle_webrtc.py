@@ -70,9 +70,9 @@ def handleConnectionQuery(data: QueryResponse):
 
 		print("State for", local_id, rtc.getConnectionState(local_id))
 
-def assertStream(targetId: str, operator: OP, client: ExecClient):
+def assertStream(targetId: str, instanceId: str, operator: OP, client: ExecClient):
 	global stream_sources
-	stream_id = f"{targetId}-stream"
+	stream_id = f"{targetId}-{instanceId}-stream"
 
 	client.set(Stream(
 		id=stream_id,
