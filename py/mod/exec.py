@@ -117,13 +117,11 @@ class ExecTargetAction(MCommand):
 
 class Stream(MItem):
     id: str
-    streamType: str
     name: str
 
-    def __init__(self, id: str, name: str, type: str):
+    def __init__(self, id: str, name: str):
         super().__init__(id, name)
         self.id = id
-        self.streamType = type
 
 
 class IceCandidate:

@@ -13,7 +13,6 @@ from typing import Dict, Set, Callable
 import TDFunctions as TDF
 import socket
 from exec import CLIENT, ExecClient, GetTargetsByServiceId, Instance, Machine, InstanceStatus, Status, Action, Emitter
-from handle_webrtc import init as initWebRTC, handle_on_answer, handle_on_ice_candidate, assertStream
 from myko import QueryResponse
 from op_target import OPTarget
 import json
@@ -50,6 +49,8 @@ class RshipExt:
 		self.execInfoOp = self.ownerComp.op('exec_info')
 
 		self.targetsOp = self.ownerComp.op('path_and_pars')
+
+		self.streamSourcesOp = self.ownerComp.op('stream_sources')
 		
 		CLIENT.setSend(self.websocketOp.sendText)
 
@@ -296,6 +297,11 @@ class RshipExt:
 
 		self.opTargets = foundOps
 
+		self.streamSourcesOp.clear()
+		for opTarget in self.opTargets.values():
+			if opTarget.getStreamInfo() is not None and opTarget.streamSource is not None:
+				self.streamSourcesOp.appendRow([opTarget.getStreamInfo().id, opTarget.streamSource])
+
 		allTouchTargets = [child for target in self.opTargets.values() for child in target.collectChildren()]
 
 		self.allTouchTargets = {target.id: target for target in allTouchTargets}
@@ -340,9 +346,15 @@ class RshipExt:
 		CLIENT.set(self.instance)
 
 
-		for opTarget in self.opTargets.values():
-			assertStream(opTarget.id, self.instance.id, opTarget.ownerComp, CLIENT)
+		# self.streamSourcesOp.clear()
+		# for opTarget in self.opTargets.values():
+		# 	self.assertStream()
+			# assertStream(opTarget.id, self.instance.id, opTarget.ownerComp, CLIENT)
 
+		for opTarget in self.opTargets.values():
+			streamInfo = opTarget.getStreamInfo()
+			if streamInfo is not None:
+				CLIENT.set(streamInfo)
 
 		allTouchTargets = [child for target in self.opTargets.values() for child in target.collectChildren()]
 
@@ -414,15 +426,6 @@ class RshipExt:
 
 		# pulseEmitter(opPath, parName, self.client)
 
-# region WebRTC Handlers
-
-	def HandleWebRTCAnswer(self, connectionId: str, localSdp: str):
-		handle_on_answer(connectionId, localSdp, CLIENT)
-
-
-	def HandleWebRTCIceCandidate(self, connectionId: str, candidate: str, sdpMid: str, lineIndex: int):
-		handle_on_ice_candidate(connectionId, candidate, sdpMid, lineIndex, CLIENT)
-
 	def makeServiceId(self):
 
 		override = self.ownerComp.par.Serviceidoverride.eval()
@@ -435,7 +438,5 @@ class RshipExt:
 		serviceId = sections[0]
 
 		return serviceId
-
-# endregion WebRTC Handlers
 
 # endregion RshipExt

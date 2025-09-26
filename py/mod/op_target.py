@@ -3,7 +3,7 @@ from uuid import uuid4
 from page_target import PageTarget
 from typing import Dict, List
 from target import TouchTarget
-from exec import Action, Target,Instance
+from exec import Action, Target,Instance,Stream
 from util import RS_BUNDLE_COMPLETE_PAR, RS_TARGET_ID_PAR, RS_TARGET_ID_STORAGE_KEY, RS_TARGET_INFO_PAGE
 
 
@@ -14,12 +14,16 @@ class OPTarget(TouchTarget):
         super().__init__(instance)
         self.ownerComp = ownerComp
         self.pageTargets: Dict[str, PageTarget] = {}
+        self.streamInfo: Stream | None = None
+        self.streamSource: str | None = None
 
 
         # print("[OPTarget]: Initializing OPTarget at " + ownerComp.path)
         self.ensureUtilPars()
         self.buildPageTargets()
         self.organizePars()
+        self.buildStream()
+
 
     @property
     def id(self):
@@ -37,6 +41,7 @@ class OPTarget(TouchTarget):
         self.ownerComp.storage[RS_TARGET_ID_STORAGE_KEY] = newId
         self.pageTargets = {}
         self.buildPageTargets()
+        self.buildStream()
         return newId
     
 
@@ -86,6 +91,32 @@ class OPTarget(TouchTarget):
         if len(page.pars) > 2:
             page.pars[1].startSection = True
             page.pars[2].startSection = True
+
+    def buildStream(self):
+
+        if "rship_stream" not in self.ownerComp.tags:
+            print(f"[OPTarget]: {self.ownerComp.path} is not a rship_stream - skipping stream creation.")
+            return
+
+        print("[OPTarget]: Building stream for target", self.id, self.ownerComp.opType)
+
+        if "TOP" in self.ownerComp.opType:
+            self.streamSource = self.ownerComp.path
+        elif "COMP" in self.ownerComp.opType:
+            self.streamSource = self.ownerComp.par.opviewer.eval()
+    
+
+
+        print("[OPTarget]: Stream Source", self.streamSource)
+        self.streamInfo = Stream(
+            id=f"{self.id}-{self.instance.id.replace(':', '-')}-stream",
+            name=self.ownerComp.name,
+        )
+        print("[OPTarget]: Stream Info", self.streamInfo.id)
+        
+
+        
+
 
     def buildPageTargets(self):
         """
@@ -180,6 +211,9 @@ class OPTarget(TouchTarget):
             bgColor="#000000",
             lastUpdated=datetime.now(timezone.utc).isoformat(),
         )
+    
+    def getStreamInfo(self):
+        return self.streamInfo
     
     def collectChildren(self) -> List[TouchTarget]:
         children = [self]
