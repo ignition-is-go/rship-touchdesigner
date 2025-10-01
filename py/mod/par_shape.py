@@ -436,7 +436,7 @@ class SequenceParShape(ParShape):
 
     def buildData(self) -> Dict[str, any]:
         # Sequence data structure can be customized as needed
-        return {'blocks': [block for block in self.parGroup.blocks]}
+        return {'blocks': [self.parGroup.sequence.numBlocks]}
 
     def buildSchemaProperties(self) -> Dict[str, any]:
         # Schema for sequence can be customized as needed

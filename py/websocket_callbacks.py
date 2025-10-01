@@ -1,4 +1,7 @@
 def onConnect(dat):
+
+	if not parent().extensionsReady:
+		return
 	me.ext.RshipExt.OnRshipConnect()
 
 def onDisconnect(dat):

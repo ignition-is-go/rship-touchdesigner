@@ -40,7 +40,6 @@ class ExecInfo:
 class RshipExt:
 
 	def __init__(self, ownerComp):
-		op.RS_LOG.Debug("[RshipExt]: Initializing RshipExt...")
 		self.ownerComp = ownerComp
 		self.findTargetsOp = self.ownerComp.op('find_targets')
 		
@@ -76,6 +75,10 @@ class RshipExt:
 		self.reconnectTimerOp.par.start.pulse()
 
 		self.remoteKeys: Set[str] = set()
+
+	
+	def postInit(self):
+		self.websocketOp.par.reset.pulse()
 
 
 	@property
@@ -255,6 +258,11 @@ class RshipExt:
 		# since machineId is coming from the Rship Link, we need not send the machine info
 
 	def refreshProjectData(self, sendEmitterValues=False):
+
+		if self.MachineId is None:
+			op.RS_LOG.Error("[RshipExt]: MachineId is not set, cannot refresh project data")
+			return
+
 		self.updateLocalInstance()
 		self.buildTargets()
 
@@ -311,9 +319,8 @@ class RshipExt:
 
 		serviceId = self.makeServiceId()
 
-		# op.RS_LOG.Info(f"[RshipExt]: Updating local instance with service ID: {serviceId}")
-		# op.RS_LOG.Info("machineId", self.MachineId)
-
+		op.RS_LOG.Debug(f"[RshipExt]: Updating local instance with service ID: {serviceId}")
+		op.RS_LOG.Debug("machineId", self.MachineId)
 
 		instance = Instance(
 			id=self.MachineId+":"+serviceId, 
