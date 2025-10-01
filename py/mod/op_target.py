@@ -18,7 +18,7 @@ class OPTarget(TouchTarget):
         self.streamSource: str | None = None
 
 
-        # print("[OPTarget]: Initializing OPTarget at " + ownerComp.path)
+        op.RS_LOG.Debug("[OPTarget]: Initializing OPTarget at " + ownerComp.path)
         self.ensureUtilPars()
         self.buildPageTargets()
         self.organizePars()
@@ -29,14 +29,14 @@ class OPTarget(TouchTarget):
     def id(self):
         id =  self.ownerComp.storage.get(RS_TARGET_ID_STORAGE_KEY, None)
         if id is None:
-            print("[OPTarget]: No target ID found, generating a new one...")
+            op.RS_LOG.Debug("[OPTarget]: No target ID found, generating a new one...")
             id = str(uuid4())
             self.ownerComp.storage[RS_TARGET_ID_STORAGE_KEY] = id
 
         return id
     
     def regenerateId(self):
-        print("[OPTarget]: Regenerating target ID...")
+        op.RS_LOG.Debug("[OPTarget]: Regenerating target ID...")
         newId = str(uuid4())
         self.ownerComp.storage[RS_TARGET_ID_STORAGE_KEY] = newId
         self.pageTargets = {}
@@ -47,10 +47,10 @@ class OPTarget(TouchTarget):
 
     def ensureUtilPars(self):
 
-        # print("[OPTarget]: OpType is " + self.ownerComp.OPType)
+        op.RS_LOG.Debug("[OPTarget]: OpType is " + self.ownerComp.OPType)
 
         if "COMP" not in self.ownerComp.OPType:
-            # print(f"[OPTarget]: {self.ownerComp.path} [{self.ownerComp.OPType}] is not a COMP - skipping util pars creation.")
+            op.RS_LOG.Debug(f"[OPTarget]: {self.ownerComp.path} [{self.ownerComp.OPType}] is not a COMP - skipping util pars creation.")
             return
 
         if RS_TARGET_INFO_PAGE not in self.ownerComp.customPages:
@@ -95,10 +95,10 @@ class OPTarget(TouchTarget):
     def buildStream(self):
 
         if "rship_stream" not in self.ownerComp.tags:
-            print(f"[OPTarget]: {self.ownerComp.path} is not a rship_stream - skipping stream creation.")
+            op.RS_LOG.Debug(f"[OPTarget]: {self.ownerComp.path} is not a rship_stream - skipping stream creation.")
             return
 
-        print("[OPTarget]: Building stream for target", self.id, self.ownerComp.opType)
+        op.RS_LOG.Debug("[OPTarget]: Building stream for target", self.id, self.ownerComp.opType)
 
         if "TOP" in self.ownerComp.opType:
             self.streamSource = self.ownerComp.path
@@ -106,13 +106,12 @@ class OPTarget(TouchTarget):
             self.streamSource = self.ownerComp.par.opviewer.eval()
     
 
-
-        print("[OPTarget]: Stream Source", self.streamSource)
+        op.RS_LOG.Debug("[OPTarget]: Stream Source", self.streamSource)
         self.streamInfo = Stream(
             id=f"{self.id}-{self.instance.id.replace(':', '-').replace(' ', '_')}-stream",
             name=self.ownerComp.name,
         )
-        print("[OPTarget]: Stream Info", self.streamInfo.id)
+        op.RS_LOG.Debug("[OPTarget]: Stream Info", self.streamInfo.id)
         
 
         
@@ -140,8 +139,8 @@ class OPTarget(TouchTarget):
     def getActions(self):
 
         def bulk_set_action_handler(action: Action, data: Dict[str, any]):
-            # print(f"[OPTarget]: Handling bulk set action for {self.id}")
-            # print("Data received:", data)
+            op.RS_LOG.Debug(f"[OPTarget]: Handling bulk set action for {self.id}")
+            op.RS_LOG.Debug("Data received:", data)
 
             for page in self.pageTargets.values():
                 for par in page.parGroupTargets.values():
@@ -151,13 +150,13 @@ class OPTarget(TouchTarget):
                     if par.parGroup.name in data:
                         value = data.get(par.parGroup.name, None)
                         if value is None:
-                            # print(f"Skipping {par.parGroup.name} on {page.name} as no value provided")
+                            op.RS_LOG.Debug(f"Skipping {par.parGroup.name} on {page.name} as no value provided")
                             continue
                         par.parShape.setData(value)
-                    # print(f"Setting {par.parGroup.name} to {value} on {page.page.name}")
+                    op.RS_LOG.Debug(f"Setting {par.parGroup.name} to {value} on {page.page.name}")
             opCompletePulse = self.ownerComp.par[RS_BUNDLE_COMPLETE_PAR]
             if not opCompletePulse.isPulse:
-                print(f"[OPTarget]: {RS_BUNDLE_COMPLETE_PAR} is not a pulse parameter, cannot pulse.")
+                op.RS_LOG.Debug(f"[OPTarget]: {RS_BUNDLE_COMPLETE_PAR} is not a pulse parameter, cannot pulse.")
                 return
             opCompletePulse.pulse()
             pass

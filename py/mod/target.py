@@ -44,4 +44,4 @@ class TouchTarget(ABC):
         Handles an action for this target.
         This method can be overridden by subclasses to provide custom action handling.
         """
-        print(f"[TouchTarget]: HandleAction not implemented for {self.__class__.__name__}.")
+        op.RS_LOG.Error(f"[TouchTarget]: HandleAction not implemented for {self.__class__.__name__}.")

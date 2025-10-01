@@ -14,7 +14,7 @@ class PageTarget(TouchTarget):
         self.parentId = parentId
         self.parGroupTargets: Dict[str, ParGroupTarget] = {}
 
-        # print(f"[PageTarget]: Initializing PageTarget for {self.page.name} at {self.ownerComp.path}")
+        op.RS_LOG.Debug(f"[PageTarget]: Initializing PageTarget for {self.page.name} at {self.ownerComp.path}")
 
         self.buildParGroupTargets()
         self.bulkUpdatedName = f"Rship{self.page.name.replace(' ', '').lower()}updated"
@@ -50,8 +50,8 @@ class PageTarget(TouchTarget):
         """
 
         def bulk_set_action_handler(action: Action, data: Dict[str, any]):
-            # print(f"[OPTarget]: Handling bulk set action for {self.id}")
-            # print("Data received:", data)
+            op.RS_LOG.Debug(f"[OPTarget]: Handling bulk set action for {self.id}")
+            op.RS_LOG.Debug("Data received:", data)
 
             for par in self.parGroupTargets.values():
                 if par.parShape is None:
@@ -60,13 +60,13 @@ class PageTarget(TouchTarget):
                 if par.parGroup.name in data:
                     value = data.get(par.parGroup.name, None)
                     if value is None:
-                        print(f"Skipping {par.parGroup.name} on {self.page.name} as no value provided")
+                        op.RS_LOG.Debug(f"Skipping {par.parGroup.name} on {self.page.name} as no value provided")
                         continue
                     par.parShape.setData(value)
-                # print(f"Setting {par.parGroup.name} to {value} on {self.page.name}")
+                op.RS_LOG.Debug(f"Setting {par.parGroup.name} to {value} on {self.page.name}")
             opCompletePulse = self.ownerComp.par[self.bulkUpdatedName]
             if not opCompletePulse.isPulse:
-                print(f"[PageTarget]: {self.bulkUpdatedName} is not a pulse parameter, cannot pulse.")
+                op.RS_LOG.Warning(f"[PageTarget]: {self.bulkUpdatedName} is not a pulse parameter, cannot pulse.")
                 return
             opCompletePulse.pulse()
             pass
@@ -118,13 +118,13 @@ class PageTarget(TouchTarget):
         Generates utility parameters for this page target.
         """
         if "COMP" not in self.ownerComp.OPType:
-            # print(f"[OPTarget]: {self.ownerComp.path} [{self.ownerComp.OPType}] is not a COMP - skipping page util pars creation.")
+            op.RS_LOG.Debug(f"[OPTarget]: {self.ownerComp.path} [{self.ownerComp.OPType}] is not a COMP - skipping page util pars creation.")
             return
         
         page = self.ownerComp.customPages[RS_TARGET_INFO_PAGE]
 
         if not page:
-            print(f"[PageTarget]: Rship Target Config page not found in {self.ownerComp.path}")
+            op.RS_LOG.Warning(f"[PageTarget]: Rship Target Config page not found in {self.ownerComp.path}")
             return
         
 

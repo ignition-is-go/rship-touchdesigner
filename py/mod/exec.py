@@ -184,7 +184,7 @@ class ExecClient:
         self.send = send
 
     def log(self, message):
-        print("RshipClient: " + message)
+        op.RS_LOG.Info("RshipClient: " + message)
 
     def sendEvent(self, event: MEvent):
         if not hasattr(self, 'send'):
@@ -320,7 +320,7 @@ class ExecClient:
 
     def removeHandler(self, actionId: str):
         if actionId in self.handlers:
-            print("removing handler for", actionId)
+            op.RS_LOG.Info("removing handler for", actionId)
             del self.handlers[actionId]
 
 

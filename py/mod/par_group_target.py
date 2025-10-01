@@ -15,9 +15,9 @@ class ParGroupTarget(TouchTarget):
         self.opTargetId = opTargetId
         self.parGroup = parGroup
         self.parShape = buildShape( ownerComp, parGroup)
-        # print(f"[ParGroupTarget]: Initializing ParGroupTarget for {self.parGroup.name} at {self.ownerComp.path}")
+        op.RS_LOG.Debug(f"[ParGroupTarget]: Initializing ParGroupTarget for {self.parGroup.name} at {self.ownerComp.path}")
 
-        # print("SCHEMA", self.parShape.buildSchemaProperties())
+        op.RS_LOG.Debug("SCHEMA", self.parShape.buildSchemaProperties())
 
     @property
     def id(self) -> str:

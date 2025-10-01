@@ -40,7 +40,7 @@ class ExecInfo:
 class RshipExt:
 
 	def __init__(self, ownerComp):
-		print("[RshipExt]: Initializing RshipExt...")
+		op.RS_LOG.Debug("[RshipExt]: Initializing RshipExt...")
 		self.ownerComp = ownerComp
 		self.findTargetsOp = self.ownerComp.op('find_targets')
 		
@@ -91,28 +91,28 @@ class RshipExt:
 
 # region exec info 
 	def updateExecInfo(self):
-		# print("[RshipExt]: Updating Exec Info from Rship Link...")
+		op.RS_LOG.Debug("[RshipExt]: Updating Exec Info from Rship Link...")
 		self.execInfoOp.par.request.pulse()
 
 	def OnExecInfoClientConnect(self, requestId: str):
-		# print("[RshipExt]: Exec Info Client connected with request ID:", requestId)
+		op.RS_LOG.Debug("[RshipExt]: Exec Info Client connected with request ID:", requestId)
 		self.execInfoRequests[requestId] = True
 
 	def OnExecInfoClientDisconnect(self, requestId: str):
 		if requestId in self.execInfoRequests:
 			del self.execInfoRequests[requestId]
-			print("[RshipExt]: Failed to get Exec Info from Rship Link")
+			op.RS_LOG.Warning("[RshipExt]: Failed to get Exec Info from Rship Link")
 			self.handleLinkMachineId(None)
 			self.handleLinkRshipUrl(None)
 
-			# print("[RshipExt]: Refreshing project data")
+			op.RS_LOG.Debug("[RshipExt]: Refreshing project data")
 			self.refreshProjectData()
 
 	def OnExecInfoUpdate(self, data: ExecInfo, requestId: str):
 		if requestId in self.execInfoRequests:
 			del self.execInfoRequests[requestId]
 
-		# print("[RshipExt]: Exec Info received:", data)
+		op.RS_LOG.Debug("[RshipExt]: Exec Info received:", data)
 
 		try:
 			data = json.loads(data)
@@ -126,7 +126,7 @@ class RshipExt:
 			if changed:
 				self.refreshProjectData()
 		except Exception as e:
-			print("[RshipExt]: Error occurred while processing Exec Info:", e)
+			op.RS_LOG.Warning("[RshipExt]: Error occurred while processing Exec Info:", e)
 			self.handleLinkMachineId(None)
 			self.handleLinkRshipUrl(None)
 
@@ -155,7 +155,7 @@ class RshipExt:
 
 		# for target in data.upserts:
 			# if target.item['id'] not in self.allTouchTargets:
-				# print(f"[RshipExt]: Remote target not found: {target.item['id']}")
+				# op.RS_LOG.Info(f"[RshipExt]: Remote target not found: {target.item['id']}")
 				# CLIENT.setTargetOffline(target.item['id'], self.instance.id)
 	
 	def setMissingOffline(self):
@@ -163,20 +163,20 @@ class RshipExt:
 		missingKeys = self.remoteKeys - allKeys
 
 		for key in missingKeys:
-			# print(f"[RshipExt]: Target {key} is missing from local list, setting offline")			
+			op.RS_LOG.Debug(f"[RshipExt]: Target {key} is missing from local list, setting offline")			
 			CLIENT.setTargetOffline(key, self.instance.id)
 
 
 	def OnRshipConnect(self):
 		self.wsConnected = True
-		print("[RshipExt]: Connected to Rship Server at ", self.websocketOp.par.netaddress.eval())
+		op.RS_LOG.Info("[RshipExt]: Connected to Rship Server at ", self.websocketOp.par.netaddress.eval())
 		self.refreshProjectData(sendEmitterValues=True)
 		CLIENT.sendQuery(GetTargetsByServiceId(self.makeServiceId()), "Target", self.targetListUpdated)
 
 
 	def OnRshipDisconnect(self):
 		self.wsConnected = False
-		print("[RshipExt]: Disconnected from Rship Server")
+		op.RS_LOG.Warning("[RshipExt]: Disconnected from Rship Server")
 
 
 	def OnRshipReceivePing(self):
@@ -205,7 +205,7 @@ class RshipExt:
 	def handleLinkMachineId(self, machineId: str | None) -> bool:
 		if machineId is None or machineId == "":
 			hostname = socket.gethostname()
-			print("[RshipExt]: Machine Id not provided, using fallback", hostname)
+			op.RS_LOG.Warning("[RshipExt]: Machine Id not provided, using fallback", hostname)
 			self.MachineId = hostname  # Fallback to hostname if not set
 			return
 		
@@ -243,13 +243,13 @@ class RshipExt:
 		changed = self.ownerComp.par.Port.eval() != port or self.ownerComp.par.Address.eval() != rship_host
 
 		if not changed and self.wsConnected:
-			# print("[RshipExt]: Rship already connected to", rship_host, "on port", port)
+			# op.RS_LOG.Info("[RshipExt]: Rship already connected to", rship_host, "on port", port)
 			return False
 
 
 		self.ownerComp.par.Port = port
 		self.ownerComp.par.Address = rship_host
-		# print("[RshipExt]: Setting Rship host to", rship_host, "on port", port)
+		op.RS_LOG.Debug("[RshipExt]: Setting Rship host to", rship_host, "on port", port)
 
 		return True
 		# since machineId is coming from the Rship Link, we need not send the machine info
@@ -261,7 +261,7 @@ class RshipExt:
 		if self.wsConnected:
 			self.sendProjectData(sendEmitterValues=sendEmitterValues)
 		else:
-			print("[RshipExt]: Not connected to Rship Server, Attempting to reconnect")
+			op.RS_LOG.Warning("[RshipExt]: Not connected to Rship Server, Attempting to reconnect")
 			self.ownerComp.par.Reconnect.pulse()
 
 # endregion
@@ -271,17 +271,17 @@ class RshipExt:
 
 
 	def cookTargetList(self):
-		# print("[RshipExt]: Finding OpTargets...")
+		# op.RS_LOG.Info("[RshipExt]: Finding OpTargets...")
 		self.findTargetsOp.cook(force=True)
 		
 
 	def buildTargets(self):
 
-		# print("[RshipExt]: Building targets...")
+		# op.RS_LOG.Info("[RshipExt]: Building targets...")
 
 		ops = [op(self.targetsOp[i, 0].val) for i in range(0, self.targetsOp.numRows)]
 
-		# print("[RshipExt]: Found", len(ops), "ops")
+		# op.RS_LOG.Info("[RshipExt]: Found", len(ops), "ops")
 
 		foundOps: Dict[str, OPTarget] = {}
 
@@ -289,7 +289,7 @@ class RshipExt:
 			opTarget = OPTarget(o, self.instance)
 
 			if opTarget.id in foundOps:
-				print(f"[RshipExt]: Target with ID {opTarget.id} already exists")
+				op.RS_LOG.Warning(f"[RshipExt]: Target with ID {opTarget.id} already exists")
 				opTarget.regenerateId()
 
 			foundOps[opTarget.id] = opTarget
@@ -304,15 +304,15 @@ class RshipExt:
 		allTouchTargets = [child for target in self.opTargets.values() for child in target.collectChildren()]
 
 		self.allTouchTargets = {target.id: target for target in allTouchTargets}
-		# print(f"[RshipExt]: Found {len(allTouchTargets)} TouchTargets in total")
-		# print("all TouchTargets", self.allTouchTargets.keys())
+		# op.RS_LOG.Info(f"[RshipExt]: Found {len(allTouchTargets)} TouchTargets in total")
+		# op.RS_LOG.Info("all TouchTargets", self.allTouchTargets.keys())
 
 	def updateLocalInstance(self): 
 
 		serviceId = self.makeServiceId()
 
-		# print(f"[RshipExt]: Updating local instance with service ID: {serviceId}")
-		# print("machineId", self.MachineId)
+		# op.RS_LOG.Info(f"[RshipExt]: Updating local instance with service ID: {serviceId}")
+		# op.RS_LOG.Info("machineId", self.MachineId)
 
 
 		instance = Instance(
@@ -326,7 +326,7 @@ class RshipExt:
 		)
 
 		self.instance = instance
-		# print(f"[RshipExt]: Local Instance updated:\n  ID: {instance.id},\n  Name: {instance.name}")
+		# op.RS_LOG.Info(f"[RshipExt]: Local Instance updated:\n  ID: {instance.id},\n  Name: {instance.name}")
 
 
 # endregion
@@ -335,11 +335,11 @@ class RshipExt:
 
 	def sendProjectData(self, sendEmitterValues = False):
 		if self.instance is None:
-			print("[RshipExt]: Instance is not set, cannot send project data")
+			op.RS_LOG.Error("[RshipExt]: Instance is not set, cannot send project data")
 			return
 		
 		# if self.wsConnected is False:
-		# 	print("[RshipExt]: Not connected to Rship Server, cannot send project data")
+		# 	op.RS_LOG.Info("[RshipExt]: Not connected to Rship Server, cannot send project data")
 		# 	return
 
 		CLIENT.set(self.instance)
@@ -366,9 +366,9 @@ class RshipExt:
 
 
 		for target in allTargets:
-			# print(f"[RshipExt]: Sending target {target.id} to server")
+			op.RS_LOG.Debug(f"[RshipExt]: Sending target {target.id} to server")
 			CLIENT.saveTarget(target)
-			# print(f"[RshipExt]: Target {target.id} sent to server")
+			# op.RS_LOG.Info(f"[RshipExt]: Target {target.id} sent to server")
 			CLIENT.setTargetStatus(target.id, self.instance.id, Status.Online)
 		
 		for action in allActions:
@@ -402,7 +402,7 @@ class RshipExt:
 
 		emitter = self.emitterIndex.get(changeKey, None)
 		if emitter is None:
-			# print(f"[RshipExt]: No emitter found for change key {changeKey}")
+			op.RS_LOG.Debug(f"[RshipExt]: No emitter found for change key {changeKey}")
 			return
 		
 
@@ -411,19 +411,17 @@ class RshipExt:
 
 
 		if handler is None:
-			# print(f"[RshipExt]: No handler found for emitter {changeKey}")
+			op.RS_LOG.Debug(f"[RshipExt]: No handler found for emitter {changeKey}")
 			return
 		
 
 		data = handler()
 
 		if data is None:
-			# print(f"[RshipExt]: No data returned from emitter handler for {changeKey}")
+			op.RS_LOG.Debug(f"[RshipExt]: No data returned from emitter handler for {changeKey}")
 			return
 		
 		CLIENT.pulseEmitter(emitter.id, data)
-
-		# pulseEmitter(opPath, parName, self.client)
 
 	def makeServiceId(self):
 

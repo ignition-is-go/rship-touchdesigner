@@ -1,5 +1,3 @@
-import json
-
 def onConnect(dat):
 	me.ext.RshipExt.OnRshipConnect()
 
@@ -24,6 +22,6 @@ def onReceivePong(dat, contents):
 	return
 
 def onMonitorMessage(dat, message):
-	# print("[Rship WS]:", message)
+	op.RS_LOG.Debug("[Rship WS]:", message)
 	return
 
