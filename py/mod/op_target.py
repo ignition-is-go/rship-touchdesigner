@@ -109,7 +109,7 @@ class OPTarget(TouchTarget):
 
         print("[OPTarget]: Stream Source", self.streamSource)
         self.streamInfo = Stream(
-            id=f"{self.id}-{self.instance.id.replace(':', '-')}-stream",
+            id=f"{self.id}-{self.instance.id.replace(':', '-').replace(' ', '_')}-stream",
             name=self.ownerComp.name,
         )
         print("[OPTarget]: Stream Info", self.streamInfo.id)
