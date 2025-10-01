@@ -86,7 +86,7 @@ class RshipExt:
 	def OnProjectPreSave(self):
 		self.cookTargetList()
 		self.updateExecInfo()
-		# self.refreshProjectData()
+		self.refreshProjectData()
 
 
 # region exec info 
@@ -170,7 +170,6 @@ class RshipExt:
 	def OnRshipConnect(self):
 		self.wsConnected = True
 		print("[RshipExt]: Connected to Rship Server at ", self.websocketOp.par.netaddress.eval())
-		initWebRTC(CLIENT)
 		self.refreshProjectData(sendEmitterValues=True)
 		CLIENT.sendQuery(GetTargetsByServiceId(self.makeServiceId()), "Target", self.targetListUpdated)
 
