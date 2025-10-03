@@ -1,5 +1,6 @@
 from abc import ABC, abstractmethod
 from typing import Dict, List
+import uuid
 from td import OP, ParGroup
 
 class ParShape(ABC):
@@ -142,7 +143,7 @@ class PulseParShape(ParShape):
         self.ownerComp = ownerComp
 
     def buildData(self) -> Dict[str, any]:
-        return {'value': None}
+        return {'value': str(uuid.uuid4())}
 
     def buildSchemaProperties(self) -> Dict[str, any]:
         return {'value': {"type": "null"}}
