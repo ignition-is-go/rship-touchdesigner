@@ -113,7 +113,7 @@ class PageTarget(TouchTarget):
                 t = ParGroupTarget(self.id, self.parentId, self.ownerComp, par, self.instance)
                 self.parGroupTargets[t.id] = t
             except Exception as e:
-                op.RS_LOG.Error(f"Error building ParGroupTarget for {par.name}: {e}")
+                op.RS_LOG.Debug(f"Error building ParGroupTarget for {par.name}: {e}")
 
 
     def generateUtilPars(self):

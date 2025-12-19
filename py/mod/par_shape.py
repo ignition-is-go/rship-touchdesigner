@@ -232,6 +232,22 @@ class XYZWParShape(ParShape):
 
     def buildData(self) -> Dict[str, any]:
         parName = self.parGroup.name
+
+        if self.ownerComp.par[parName + "z"] is None:
+            return {
+                "x": self.ownerComp.par[parName + "x"].eval(),
+                "y": self.ownerComp.par[parName + "y"].eval(),
+            }
+        
+
+        if self.ownerComp.par[parName + "w"] is None:
+            return {
+                "x": self.ownerComp.par[parName + "x"].eval(),
+                "y": self.ownerComp.par[parName + "y"].eval(),
+                "z": self.ownerComp.par[parName + "z"].eval(),
+            }
+
+
         return {
             "x": self.ownerComp.par[parName + "x"].eval(),
             "y": self.ownerComp.par[parName + "y"].eval(),
@@ -240,6 +256,22 @@ class XYZWParShape(ParShape):
         }
 
     def buildSchemaProperties(self) -> Dict[str, any]:
+
+        if self.ownerComp.par[self.parGroup.name + "z"] is None:
+            return {
+                "x": {"type": "number"},
+                "y": {"type": "number"},
+            }
+        
+
+        if self.ownerComp.par[self.parGroup.name + "w"] is None:
+            return {
+                "x": {"type": "number"},
+                "y": {"type": "number"},
+                "z": {"type": "number"},
+            }
+
+
         return {
             "x": {"type": "number"},
             "y": {"type": "number"},
@@ -289,13 +321,21 @@ class RGBParShape(ParShape):
             self.ownerComp.par[parName + "b"] = data["b"]
 
 
-class RGBAParShape(ParShape):
+class ColorParShape(ParShape):
     def __init__(self, ownerComp: OP, parGroup: ParGroup):
         self.parGroup = parGroup
         self.ownerComp = ownerComp
 
     def buildData(self) -> Dict[str, any]:
         parName = self.parGroup.name
+
+        if self.ownerComp.par[parName + "a"] is None:
+            return {
+                "r": self.ownerComp.par[parName + "r"].eval(),
+                "g": self.ownerComp.par[parName + "g"].eval(),
+                "b": self.ownerComp.par[parName + "b"].eval(),
+            }
+
         return {
             "r": self.ownerComp.par[parName + "r"].eval(),
             "g": self.ownerComp.par[parName + "g"].eval(),
@@ -304,6 +344,13 @@ class RGBAParShape(ParShape):
         }
 
     def buildSchemaProperties(self) -> Dict[str, any]:
+        if self.ownerComp.par[self.parGroup.name + "a"] is None:
+            return {
+                "r": {"type": "number", "minimum": 0, "maximum": 1},
+                "g": {"type": "number", "minimum": 0, "maximum": 1},
+                "b": {"type": "number", "minimum": 0, "maximum": 1},
+            }
+
         return {
             "r": {"type": "number", "minimum": 0, "maximum": 1},
             "g": {"type": "number", "minimum": 0, "maximum": 1},
@@ -356,6 +403,14 @@ class UVWParShape(ParShape):
 
     def buildData(self) -> Dict[str, any]:
         parName = self.parGroup.name
+
+        if self.ownerComp.par[parName + "w"] is None:
+            return {
+                "u": self.ownerComp.par[parName + "u"].eval(),
+                "v": self.ownerComp.par[parName + "v"].eval(),
+            }
+
+
         return {
             "u": self.ownerComp.par[parName + "u"].eval(),
             "v": self.ownerComp.par[parName + "v"].eval(),
@@ -363,6 +418,13 @@ class UVWParShape(ParShape):
         }
 
     def buildSchemaProperties(self) -> Dict[str, any]:
+
+        if self.ownerComp.par[self.parGroup.name + "w"] is None:
+            return {
+                "u": {"type": "number", "minimum": 0, "maximum": 1},
+                "v": {"type": "number", "minimum": 0, "maximum": 1},
+            }
+
         return {
             "u": {"type": "number", "minimum": 0, "maximum": 1},
             "v": {"type": "number", "minimum": 0, "maximum": 1},
@@ -467,7 +529,7 @@ def buildShape(ownerComp: OP, parGroup: ParGroup) -> ParShape:
     elif parGroup.style == "RGB":
         return RGBParShape(ownerComp, parGroup)
     elif parGroup.style == "RGBA":
-        return RGBAParShape(ownerComp, parGroup)
+        return ColorParShape(ownerComp, parGroup)
     elif parGroup.style == "UV":
         return UVParShape(ownerComp, parGroup)
     elif parGroup.style == "UVW":
