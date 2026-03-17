@@ -12,6 +12,7 @@ def onReceiveText(dat, rowIndex, message):
 	return
 
 def onReceiveBinary(dat, contents):
+	op.RS_LOG.Debug('[Rship WS]: Ignoring binary frame; TouchDesigner executor is JSON-only')
 	return
 
 def onReceivePing(dat, contents):

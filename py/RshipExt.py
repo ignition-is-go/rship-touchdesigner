@@ -13,7 +13,7 @@ from enum import Enum
 
 import TDFunctions as TDF
 import socket
-from exec import CLIENT, ExecClient, GetTargetsByServiceId, Instance, Machine, InstanceStatus, Status, Action, Emitter
+from exec import CLIENT, ExecClient, GetActionsByQuery, GetEmittersByQuery, GetTargetsByQuery, Instance, Machine, InstanceStatus, Status, Action, Emitter
 from myko import QueryResponse
 from op_target import OPTarget
 import json
@@ -26,6 +26,7 @@ from util import makeEmitterChangeKey
 class RshipState(Enum):
 	UNINITIALIZED = "uninitialized"  # No machine ID yet
 	READY = "ready"  # Machine ID set, can operate
+	DISCONNECTED = "disconnected"  # Configured locally, but websocket is not connected
 	CONNECTED = "connected"  # WebSocket connected
 	SYNCING = "syncing"  # Currently syncing data to server
 
@@ -49,6 +50,13 @@ class ExecInfo:
 # region RshipExt
 
 class RshipExt:
+	STATS_PAGE = 'Rship Sync Stats'
+	LOCAL_TARGETS_PAR = 'Localtargets'
+	LOCAL_ACTIONS_PAR = 'Localactions'
+	LOCAL_EMITTERS_PAR = 'Localemitters'
+	REMOTE_TARGETS_PAR = 'Remotetargets'
+	REMOTE_ACTIONS_PAR = 'Remoteactions'
+	REMOTE_EMITTERS_PAR = 'Remoteemitters'
 
 	def __init__(self, ownerComp):
 		self.ownerComp = ownerComp
@@ -91,17 +99,85 @@ class RshipExt:
 
 		self.remoteKeys: Set[str] = set()
 		self.sentTargetStatuses: Dict[str, Status] = {}  # Track which statuses we've sent
+		self.execInfoFailureLogged = False
+		self.remoteStats = {
+			'targets': 0,
+			'actions': 0,
+			'emitters': 0,
+		}
+
+		self.ensureStatsPars()
+		self.updateStatsPage(localTargets=0, localActions=0, localEmitters=0)
 
 	
 	def postInit(self):
+		CLIENT.setSend(self.websocketOp.sendText)
 		self.websocketOp.par.reset.pulse()
+
+	def ensureStatsPars(self):
+		if self.STATS_PAGE not in self.ownerComp.customPages:
+			self.ownerComp.appendCustomPage(self.STATS_PAGE)
+
+		page = self.ownerComp.customPages[self.STATS_PAGE]
+		parNames = [
+			(self.LOCAL_TARGETS_PAR, 'Local Targets'),
+			(self.LOCAL_ACTIONS_PAR, 'Local Actions'),
+			(self.LOCAL_EMITTERS_PAR, 'Local Emitters'),
+			(self.REMOTE_TARGETS_PAR, 'Remote Targets'),
+			(self.REMOTE_ACTIONS_PAR, 'Remote Actions'),
+			(self.REMOTE_EMITTERS_PAR, 'Remote Emitters'),
+		]
+
+		for parName, label in parNames:
+			if parName not in page.pars:
+				page.appendInt(parName, label=label)
+			par = self.ownerComp.par[parName]
+			par.readOnly = True
+
+		page.sort(
+			self.LOCAL_TARGETS_PAR,
+			self.LOCAL_ACTIONS_PAR,
+			self.LOCAL_EMITTERS_PAR,
+			self.REMOTE_TARGETS_PAR,
+			self.REMOTE_ACTIONS_PAR,
+			self.REMOTE_EMITTERS_PAR,
+		)
+		self.ownerComp.par[self.REMOTE_TARGETS_PAR].startSection = True
+
+	def updateStatsPage(
+		self,
+		localTargets: int | None = None,
+		localActions: int | None = None,
+		localEmitters: int | None = None,
+		remoteTargets: int | None = None,
+		remoteActions: int | None = None,
+		remoteEmitters: int | None = None,
+	):
+		if localTargets is not None:
+			self.ownerComp.par[self.LOCAL_TARGETS_PAR] = int(localTargets)
+		if localActions is not None:
+			self.ownerComp.par[self.LOCAL_ACTIONS_PAR] = int(localActions)
+		if localEmitters is not None:
+			self.ownerComp.par[self.LOCAL_EMITTERS_PAR] = int(localEmitters)
+		if remoteTargets is not None:
+			self.remoteStats['targets'] = int(remoteTargets)
+			self.ownerComp.par[self.REMOTE_TARGETS_PAR] = int(remoteTargets)
+		if remoteActions is not None:
+			self.remoteStats['actions'] = int(remoteActions)
+			self.ownerComp.par[self.REMOTE_ACTIONS_PAR] = int(remoteActions)
+		if remoteEmitters is not None:
+			self.remoteStats['emitters'] = int(remoteEmitters)
+			self.ownerComp.par[self.REMOTE_EMITTERS_PAR] = int(remoteEmitters)
 
 	def _transitionState(self, newState: RshipState):
 		"""Transition to a new state with logging"""
 		if self.state != newState:
 			op.RS_LOG.Info(f"[RshipExt]: State transition: {self.state.value} -> {newState.value}")
 			self.state = newState
-			self.ConnectionStatus = newState.value
+			if newState == RshipState.READY:
+				self.ConnectionStatus = RshipState.DISCONNECTED.value
+			else:
+				self.ConnectionStatus = newState.value
 
 	def _ensureReady(self) -> bool:
 		"""Ensure we have minimum requirements to operate. Returns True if ready."""
@@ -158,11 +234,15 @@ class RshipExt:
 	def OnExecInfoClientDisconnect(self, requestId: str):
 		if requestId in self.execInfoRequests:
 			del self.execInfoRequests[requestId]
-			op.RS_LOG.Warning("[RshipExt]: Failed to get Exec Info from Rship Link")
-			self._updateConfiguration(None, None)
+			if not self.execInfoFailureLogged:
+				op.RS_LOG.Warning("[RshipExt]: Failed to get Exec Info from Rship Link")
+				self.execInfoFailureLogged = True
+			else:
+				op.RS_LOG.Debug("[RshipExt]: Exec Info unavailable, continuing with local configuration")
+			configChanged = self._updateConfiguration(None, None)
 
-			op.RS_LOG.Debug("[RshipExt]: Refreshing project data")
-			if self._ensureReady():
+			if configChanged and self._ensureReady():
+				op.RS_LOG.Debug("[RshipExt]: Refreshing project data")
 				self.refreshProjectData()
 
 	def OnExecInfoUpdate(self, data: ExecInfo, requestId: str):
@@ -171,6 +251,7 @@ class RshipExt:
 
 		try:
 			data = json.loads(data)
+			self.execInfoFailureLogged = False
 
 			machineId = data.get('machineId', None)
 			connection = data.get('connectionStatus', None)
@@ -200,7 +281,8 @@ class RshipExt:
 		# Update machine ID
 		if machineId is None or machineId == "":
 			hostname = socket.gethostname()
-			op.RS_LOG.Warning("[RshipExt]: Machine Id not provided, using fallback", hostname)
+			if self._machineId != hostname:
+				op.RS_LOG.Warning("[RshipExt]: Machine Id not provided, using fallback", hostname)
 			machineId = hostname
 		
 		if self._machineId != machineId:
@@ -210,19 +292,35 @@ class RshipExt:
 			if self.state != RshipState.UNINITIALIZED:
 				self._createInstance()
 		
-		# Update Rship URL
+		# Update Rship URL. If exec info is unavailable, preserve any manually configured address.
+		if rshipUrl is None or rshipUrl == "":
+			manualAddress = self.ownerComp.par.Address.eval()
+			if manualAddress not in (None, ""):
+				rshipUrl = str(manualAddress)
+
 		if rshipUrl is not None and rshipUrl != "":
-			port = 5155
-			sections = rshipUrl.split("://")
-			protocol = sections[0]
-			path = sections[1]
-			path_sections = path.split(":")
-			path = path_sections[0]
-			after_colon = path_sections[1] if len(path_sections) > 1 else port
-			after_colon_sections = after_colon.split("/")
-			port = after_colon_sections[0] if after_colon_sections else port
-			rshipUrl = f"{protocol}://{path}"
-			port = int(port)
+			defaultPort = int(self.ownerComp.par.Port.eval()) if self.ownerComp.par.Port.eval() else 5155
+			port = defaultPort
+			rawUrl = str(rshipUrl).strip()
+			protocol = None
+			host = rawUrl
+
+			if "://" in rawUrl:
+				sections = rawUrl.split("://", 1)
+				protocol = sections[0]
+				host = sections[1]
+
+			host = host.split("/", 1)[0]
+
+			if ":" in host:
+				hostSections = host.rsplit(":", 1)
+				host = hostSections[0]
+				try:
+					port = int(hostSections[1])
+				except ValueError:
+					port = defaultPort
+
+			rshipUrl = f"{protocol}://{host}" if protocol else host
 			
 			if self._rshipUrl != rshipUrl or self._rshipPort != port:
 				self._rshipUrl = rshipUrl
@@ -274,9 +372,17 @@ class RshipExt:
 					offlineCount += 1
 		
 		op.RS_LOG.Info(f"[RshipExt]: <<< targetListUpdated - set {offlineCount} targets offline")
+		self.updateStatsPage(remoteTargets=len(remoteKeys))
+
+	def actionListUpdated(self, data: QueryResponse):
+		self.updateStatsPage(remoteActions=len(data.upserts))
+
+	def emitterListUpdated(self, data: QueryResponse):
+		self.updateStatsPage(remoteEmitters=len(data.upserts))
 
 
 	def OnRshipConnect(self):
+		CLIENT.setSend(self.websocketOp.sendText)
 		self.wsConnected = True
 		self._transitionState(RshipState.CONNECTED)
 		
@@ -293,7 +399,29 @@ class RshipExt:
 		self.refreshProjectData(sendEmitterValues=True)
 		op.RS_LOG.Info("[RshipExt]: Sending query for remote targets...")
 		# Query after sending to ensure our targets are registered before cleanup
-		CLIENT.sendQuery(GetTargetsByServiceId(self.makeServiceId()), "Target", self.targetListUpdated)
+		CLIENT.sendQuery(
+			GetTargetsByQuery({
+				"serviceId": self.makeServiceId(),
+			}),
+			"Target",
+			self.targetListUpdated
+		)
+		CLIENT.sendQuery(
+			GetActionsByQuery({
+				"serviceId": self.makeServiceId(),
+				"schema": None,
+			}),
+			"Action",
+			self.actionListUpdated
+		)
+		CLIENT.sendQuery(
+			GetEmittersByQuery({
+				"serviceId": self.makeServiceId(),
+				"schema": None,
+			}),
+			"Emitter",
+			self.emitterListUpdated
+		)
 		self._transitionState(RshipState.CONNECTED)
 		op.RS_LOG.Info("[RshipExt]: <<< OnRshipConnect END")
 
@@ -308,6 +436,7 @@ class RshipExt:
 			self._transitionState(RshipState.UNINITIALIZED)
 		
 		self.sentTargetStatuses.clear()
+		self.updateStatsPage(remoteTargets=0, remoteActions=0, remoteEmitters=0)
 
 
 	def OnRshipReceivePing(self):
@@ -323,6 +452,7 @@ class RshipExt:
 
 
 	def OnRshipReceiveText(self, text: str):
+		CLIENT.setSend(self.websocketOp.sendText)
 		CLIENT.parseMessage(text)
 
 
@@ -409,13 +539,14 @@ class RshipExt:
 		if self.instance is None:
 			op.RS_LOG.Error("[RshipExt]: Instance is not set, cannot send project data")
 			return
-		
-		CLIENT.set(self.instance)
+
+		CLIENT.setSend(self.websocketOp.sendText)
+		events = [CLIENT.buildSetEvent(self.instance)]
 
 		for opTarget in self.opTargets.values():
 			streamInfo = opTarget.getStreamInfo()
 			if streamInfo is not None:
-				CLIENT.set(streamInfo)
+				events.append(CLIENT.buildSetEvent(streamInfo))
 
 		allTouchTargets = [child for target in self.opTargets.values() for child in target.collectChildren()]
 
@@ -424,16 +555,23 @@ class RshipExt:
 		allEmitters = [emitter for target in allTouchTargets for emitter in target.getEmitters()]
 
 		self.allTouchTargets = {target.id: target for target in allTouchTargets}
+		self.emitterIndex.clear()
+		self.emitterHandlers.clear()
 
 		op.RS_LOG.Info(f"[RshipExt]: Sending {len(allTargets)} targets, {len(allActions)} actions, {len(allEmitters)} emitters")
+		self.updateStatsPage(
+			localTargets=len(allTargets),
+			localActions=len(allActions),
+			localEmitters=len(allEmitters),
+		)
 		
 		statusesToSend = 0
 		for target in allTargets:
-			CLIENT.saveTarget(target)
+			events.append(CLIENT.buildSetEvent(target))
 			
 			# Only send status if it's changed or never been sent
 			if target.id not in self.sentTargetStatuses or self.sentTargetStatuses[target.id] != Status.Online:
-				CLIENT.setTargetStatus(target.id, self.instance.id, Status.Online)
+				events.append(CLIENT.buildTargetStatusEvent(target.id, self.instance.id, Status.Online))
 				self.sentTargetStatuses[target.id] = Status.Online
 				statusesToSend += 1
 		
@@ -443,15 +581,22 @@ class RshipExt:
 			CLIENT.saveHandler(action.id, action.handler)
 			
 			del action.handler  # Remove handler from action to avoid circular references
-			CLIENT.saveAction(action)
+			CLIENT.actions[action.id] = action
+			events.append(CLIENT.buildSetEvent(action))
 
 		for emitter in allEmitters:
-			self.emitterIndex[emitter.changeKey] = emitter
-			self.emitterHandlers[emitter.changeKey] = emitter.handler
+			changeKeys = getattr(emitter, 'changeKeys', [emitter.changeKey])
+			for changeKey in changeKeys:
+				self.emitterIndex[changeKey] = emitter
+				self.emitterHandlers[changeKey] = emitter.handler
 			
 			del emitter.handler  # Remove handler from emitter to avoid circular references
 			del emitter.changeKey
-			CLIENT.saveEmitter(emitter)
+			if hasattr(emitter, 'changeKeys'):
+				del emitter.changeKeys
+			events.append(CLIENT.buildSetEvent(emitter))
+
+		CLIENT.sendEventBatch(events)
 
 		if not sendEmitterValues:
 			return
@@ -464,6 +609,7 @@ class RshipExt:
 
 
 	def PulseEmitter(self, opPath: str, parName: str):
+		CLIENT.setSend(self.websocketOp.sendText)
 		changeKey = makeEmitterChangeKey(opPath, parName)
 
 		emitter = self.emitterIndex.get(changeKey, None)

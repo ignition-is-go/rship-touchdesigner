@@ -5,6 +5,7 @@ from typing import Dict, List
 from target import TouchTarget
 from exec import Action, Target,Instance,Stream
 from util import RS_BUNDLE_COMPLETE_PAR, RS_TARGET_ID_PAR, RS_TARGET_ID_STORAGE_KEY, RS_TARGET_INFO_PAGE
+import json
 
 
 
@@ -154,6 +155,12 @@ class OPTarget(TouchTarget):
                             continue
                         par.parShape.setData(value)
                     op.RS_LOG.Debug(f"Setting {par.parGroup.name} to {value} on {page.page.name}")
+                for sequenceTarget in page.sequenceTargets.values():
+                    value = data.get(sequenceTarget.sequence.name, None)
+                    if value is None:
+                        continue
+                    sequenceTarget.parShape.setData(value)
+                    op.RS_LOG.Debug(f"Setting sequence {sequenceTarget.sequence.name} on {page.page.name}")
             opCompletePulse = self.ownerComp.par[RS_BUNDLE_COMPLETE_PAR]
             if not opCompletePulse.isPulse:
                 op.RS_LOG.Debug(f"[OPTarget]: {RS_BUNDLE_COMPLETE_PAR} is not a pulse parameter, cannot pulse.")
@@ -162,21 +169,28 @@ class OPTarget(TouchTarget):
             pass
 
 
-        properties = {}
-
+        orderedEntries = []
         for page in self.pageTargets.values():
-            for par in page.parGroupTargets.values():
+            orderedEntries.extend(page.buildBulkSchemaEntries(sectionPrefix=page.page.name))
 
-                properties[par.parGroup.name] = {
-                    "type": "object",
-                    "properties": par.parShape.buildSchemaProperties(),
-                }
+        properties = {entry["path"]: entry["schema"] for entry in orderedEntries}
+        schemaLayout = []
+        for entry in orderedEntries:
+            layoutEntry = {"path": entry["path"]}
+            if entry["label"] is not None:
+                layoutEntry["label"] = entry["label"]
+            if entry["section"] is not None:
+                layoutEntry["section"] = entry["section"]
+            schemaLayout.append(layoutEntry)
 
 
         schema = {
             "type": "object",
             "properties": properties,
         }
+        op.RS_LOG.Info(
+            f"[OPTarget]: Bulk schema for {self.id}: {json.dumps({'schema': schema, 'schemaLayout': schemaLayout}, sort_keys=True)}"
+        )
 
 
 
@@ -186,6 +200,7 @@ class OPTarget(TouchTarget):
             handler=bulk_set_action_handler,
             targetId=self.id,
             schema=schema,
+            schemaLayout=schemaLayout,
             serviceId=self.instance.serviceId
         )
 
@@ -204,11 +219,7 @@ class OPTarget(TouchTarget):
             category=self.ownerComp.OPType,
             name=self.ownerComp.name,
             parentTargets=[],
-            rootLevel=True,
             serviceId=self.instance.serviceId,
-            fgColor="#ffffff",
-            bgColor="#000000",
-            lastUpdated=datetime.now(timezone.utc).isoformat(),
         )
     
     def getStreamInfo(self):

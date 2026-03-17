@@ -1,4 +1,3 @@
-import uuid
 from abc import ABC, abstractmethod
 from typing import Dict, List
 
@@ -140,7 +139,7 @@ class PulseParShape(ParShape):
         self.ownerComp = ownerComp
 
     def buildData(self) -> Dict[str, any]:
-        return {"value": str(uuid.uuid4())}
+        return {"value": None}
 
     def buildSchemaProperties(self) -> Dict[str, any]:
         return {"value": {"type": "null"}}
@@ -485,25 +484,6 @@ class FileParShape(ParShape):
             self.ownerComp.par[self.parGroup.name] = data["value"]
 
 
-class SequenceParShape(ParShape):
-    def __init__(self, ownerComp: OP, parGroup: ParGroup):
-        self.parGroup = parGroup
-        self.ownerComp = ownerComp
-
-    def buildData(self) -> Dict[str, any]:
-        # Sequence data structure can be customized as needed
-        return {"blocks": [self.parGroup.sequence.numBlocks]}
-
-    def buildSchemaProperties(self) -> Dict[str, any]:
-        # Schema for sequence can be customized as needed
-        return {"blocks": {"type": "number"}}
-
-    def setData(self, data: Dict[str, any]):
-        self.parGroup.sequence.numBlocks = data.get("blocks", 1)
-        # Implement logic to set sequence data if needed
-        pass
-
-
 def buildShape(ownerComp: OP, parGroup: ParGroup) -> ParShape:
     """
     Factory function to build the appropriate ParShape based on the parGroup style.
@@ -544,3 +524,140 @@ def buildShape(ownerComp: OP, parGroup: ParGroup) -> ParShape:
         return SequenceParShape(ownerComp, parGroup)
 
     raise ValueError(f"Unknown ParType: {parGroup.style}")
+
+
+class SequenceParShape(ParShape):
+    def __init__(self, ownerComp: OP, parGroup: ParGroup, sequenceParGroups: List[ParGroup] | None = None):
+        self.parGroup = parGroup
+        self.ownerComp = ownerComp
+        self.sequenceParGroups = sequenceParGroups or [parGroup]
+
+    def _getSchemaParGroups(self) -> List[ParGroup]:
+        schemaParGroups = []
+
+        for parGroup in self.sequenceParGroups:
+            if parGroup is None:
+                continue
+            if parGroup.style == "Sequence":
+                continue
+            if parGroup.name == self.parGroup.name:
+                continue
+            schemaParGroups.append(parGroup)
+
+        if len(schemaParGroups) > 0:
+            return schemaParGroups
+
+        sequence = self.parGroup.sequence
+        if sequence is None or len(sequence.blocks) == 0:
+            return []
+
+        fallbackParGroups = []
+        for blockParGroup in sequence.blocks[0]:
+            if blockParGroup is None:
+                continue
+            if blockParGroup.style == "Sequence":
+                continue
+            fallbackParGroups.append(blockParGroup)
+
+        return fallbackParGroups
+
+    def _getSequenceMemberKey(self, parGroup: ParGroup) -> str:
+        sequence = getattr(parGroup, 'sequence', None)
+        if sequence is None:
+            return parGroup.name
+
+        sequenceIndex = getattr(parGroup, 'sequenceIndex', None)
+        if sequenceIndex is None:
+            sequenceIndex = getattr(parGroup, 'blockIndex', None)
+
+        if sequenceIndex is None:
+            return parGroup.name
+
+        prefix = f"{sequence.name}{sequenceIndex}"
+        if parGroup.name.startswith(prefix):
+            return parGroup.name[len(prefix):]
+
+        return parGroup.name
+
+    def _unwrapSequenceMemberData(self, value: any):
+        if isinstance(value, dict):
+            keys = list(value.keys())
+            if keys == ["value"]:
+                return value["value"]
+        return value
+
+    def _wrapSequenceMemberData(self, parGroup: ParGroup, value: any):
+        shape = buildShape(self.ownerComp, parGroup)
+        schemaProperties = shape.buildSchemaProperties()
+        if list(schemaProperties.keys()) == ["value"] and not isinstance(value, dict):
+            return {"value": value}
+        return value
+
+    def _unwrapSequenceMemberSchema(self, schemaProperties: Dict[str, any]):
+        if list(schemaProperties.keys()) == ["value"]:
+            return schemaProperties["value"]
+        return {
+            "type": "object",
+            "properties": schemaProperties,
+        }
+
+    def buildData(self) -> List[Dict[str, any]]:
+        items = []
+        sequence = self.parGroup.sequence
+        if sequence is None:
+            return items
+
+        for block in sequence.blocks:
+            blockItem = {}
+            for blockParGroup in block:
+                blockShape = buildShape(self.ownerComp, blockParGroup)
+                blockItem[self._getSequenceMemberKey(blockParGroup)] = self._unwrapSequenceMemberData(
+                    blockShape.buildData()
+                )
+            items.append(blockItem)
+
+        return items
+
+    def buildSchemaProperties(self) -> Dict[str, any]:
+        itemProperties = {}
+        seenParGroups = set()
+
+        for blockParGroup in self._getSchemaParGroups():
+            memberKey = self._getSequenceMemberKey(blockParGroup)
+            if memberKey in seenParGroups:
+                continue
+            seenParGroups.add(memberKey)
+            blockShape = buildShape(self.ownerComp, blockParGroup)
+            itemProperties[memberKey] = self._unwrapSequenceMemberSchema(
+                blockShape.buildSchemaProperties()
+            )
+
+        return {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": itemProperties,
+            },
+        }
+
+    def setData(self, data: List[Dict[str, any]]):
+        sequence = self.parGroup.sequence
+        if sequence is None:
+            return
+
+        if not isinstance(data, list):
+            raise ValueError("Sequence data must be an array")
+
+        sequence.numBlocks = len(data)
+
+        for blockIndex, blockData in enumerate(data):
+            if not isinstance(blockData, dict):
+                raise ValueError(f"Sequence block {blockIndex} must be an object")
+
+            block = sequence.blocks[blockIndex]
+            for blockParGroup in block:
+                blockValue = blockData.get(self._getSequenceMemberKey(blockParGroup), None)
+                if blockValue is None:
+                    continue
+                blockShape = buildShape(self.ownerComp, blockParGroup)
+                blockShape.setData(self._wrapSequenceMemberData(blockParGroup, blockValue))

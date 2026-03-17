@@ -33,11 +33,7 @@ class ParGroupTarget(TouchTarget):
             name=self.parGroup.name,
             parentTargets=[self.parentId],
             category=self.parGroup.style,
-            rootLevel=False,
             serviceId=self.instance.serviceId,
-            fgColor="#ffffff",
-            bgColor="#000000",
-            lastUpdated=datetime.now(timezone.utc).isoformat(),
         )
 
 
