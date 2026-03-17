@@ -496,7 +496,7 @@ def buildShape(ownerComp: OP, parGroup: ParGroup) -> ParShape:
         return StrParShape(ownerComp, parGroup)
     elif parGroup.style == "Toggle":
         return ToggleParShape(ownerComp, parGroup)
-    elif parGroup.style == "Pulse":
+    elif parGroup.style == "Pulse" or parGroup.style == "Momentary":
         return PulseParShape(ownerComp, parGroup)
     elif parGroup.style == "WH":
         return WHParShape(ownerComp, parGroup)

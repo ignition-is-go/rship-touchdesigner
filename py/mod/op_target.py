@@ -5,7 +5,6 @@ from typing import Dict, List
 from target import TouchTarget
 from exec import Action, Target,Instance,Stream
 from util import RS_BUNDLE_COMPLETE_PAR, RS_TARGET_ID_PAR, RS_TARGET_ID_STORAGE_KEY, RS_TARGET_INFO_PAGE
-import json
 
 
 
@@ -188,9 +187,6 @@ class OPTarget(TouchTarget):
             "type": "object",
             "properties": properties,
         }
-        op.RS_LOG.Info(
-            f"[OPTarget]: Bulk schema for {self.id}: {json.dumps({'schema': schema, 'schemaLayout': schemaLayout}, sort_keys=True)}"
-        )
 
 
 

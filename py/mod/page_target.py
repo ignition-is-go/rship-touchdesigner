@@ -5,7 +5,6 @@ from exec import Target, TargetStatus, Action, Emitter, Instance
 from typing import Dict, List
 from target import TouchTarget
 from util import RS_TARGET_INFO_PAGE
-import json
 
 class PageTarget(TouchTarget):
 
@@ -96,9 +95,6 @@ class PageTarget(TouchTarget):
             "type": "object",
             "properties": properties,
         }
-        op.RS_LOG.Info(
-            f"[PageTarget]: Bulk schema for {self.id}: {json.dumps({'schema': schema, 'schemaLayout': schemaLayout}, sort_keys=True)}"
-        )
 
 
         bulk_set_action = Action(
