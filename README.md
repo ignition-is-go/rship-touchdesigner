@@ -2,7 +2,7 @@
 
 The TouchDesigner executor for Rocketship. Establishes a connection with a Rocketship server, scans the network for Base COMPs with an 'rship' tag, and exposes their custom parameters to rship as targets.
 
-Notch TOPs also have first-class support. Similar to Base COMPs their parameters can be quickly turned into targets by tagging the Notch TOP 'rship'
+Notch TOPs also have first-class support. Similar to Base COMPs, their parameters can be quickly turned into targets by tagging the Notch TOP 'rship'.
 
 ## Setup
 
