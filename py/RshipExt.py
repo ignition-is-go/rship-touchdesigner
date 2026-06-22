@@ -25,6 +25,7 @@ from op_target import OPTarget
 from target import TouchTarget
 from util import makeEmitterChangeKey
 from connection import ConnectionManager, ConnState
+import rship
 
 # region ExecInfo
 
@@ -54,6 +55,10 @@ class RshipExt:
 
 	def __init__(self, ownerComp):
 		self.ownerComp = ownerComp
+		# Expose the user-facing API module globally as op.RSHIP.Api so extensions
+		# anywhere in the project can use it (bare `import rship` only resolves for
+		# DATs inside this comp). Same module instance we use -> shares CLIENT/registry.
+		self.Api = rship
 		self.findTargetsOp = self.ownerComp.op('find_targets')
 
 		self.websocketOp = self.ownerComp.op('websocket')
@@ -278,6 +283,12 @@ class RshipExt:
 		self.updateExecInfo()
 		self.conn.tick()
 
+		# Pick up Python targets registered after connect (e.g. late extension init).
+		if self.conn.isConnected and rship.consume_dirty():
+			op.RS_LOG.Debug("[RshipExt]: rship registry changed, re-publishing")
+			self.refreshProjectData()
+			self.seedProperties()
+
 	# --- resend_all par ---
 
 	def ResendAll(self):
@@ -458,6 +469,13 @@ class RshipExt:
 			foundOps[opTarget.id] = opTarget
 
 		self.opTargets = foundOps
+
+		# Merge user-registered Python targets (the rship.target(...) API). They
+		# implement the TouchTarget interface so they flow through the normal
+		# send/seed lifecycle; inject the instance so their ids can resolve.
+		for proxy in rship.get_targets():
+			proxy.instance = self.instance
+			self.opTargets[proxy.id] = proxy
 
 		self.streamSourcesOp.clear()
 		for opTarget in self.opTargets.values():
