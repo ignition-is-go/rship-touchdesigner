@@ -659,5 +659,12 @@ class SequenceParShape(ParShape):
                 blockValue = blockData.get(self._getSequenceMemberKey(blockParGroup), None)
                 if blockValue is None:
                     continue
-                blockShape = buildShape(self.ownerComp, blockParGroup)
+                try:
+                    blockShape = buildShape(self.ownerComp, blockParGroup)
+                except ValueError as e:
+                    op.RS_LOG.Debug(f"[SequenceParShape]: Skipping par '{blockParGroup.name}' in setData: {e}")
+                    continue
+                if (blockParGroup.style == "Pulse" or blockParGroup.style == "Momentary") and not blockValue:
+                    print("skipping pulse in sequence")
+                    continue
                 blockShape.setData(self._wrapSequenceMemberData(blockParGroup, blockValue))
