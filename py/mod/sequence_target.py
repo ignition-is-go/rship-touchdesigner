@@ -1,4 +1,4 @@
-from exec import Action, CLIENT, Emitter, Instance, Target
+from exec import Action, CLIENT, Emitter, Instance, Target, makeWriterRef
 from par_shape import SequenceParShape
 from target import TouchTarget
 from util import makeEmitterChangeKey
@@ -39,8 +39,14 @@ class SequenceTarget(TouchTarget):
         schema = self.parShape.buildSchemaProperties()
 
         def handleSetAction(action: Action, data):
-            return self.parShape.setData(data)
+            self.parShape.setData(data)
+            # Sequence block edits don't reliably trigger the emitters parexec, so
+            # the Deferred readback never fires and the server stays diverged.
+            # Pulse the applied value explicitly (Applied mode) to converge.
+            CLIENT.pulseEmitter(f"{self.id}:updated", self.parShape.buildData())
+            return
 
+        # Canonical writer of the {id}:updated property emitter.
         setAction = Action(
             id=f"{self.id}:set",
             name=f"Set {self.sequence.name}",
@@ -48,22 +54,11 @@ class SequenceTarget(TouchTarget):
             schema=schema,
             serviceId=self.instance.serviceId,
             handler=handleSetAction,
+            writesTo=makeWriterRef(f"{self.id}:updated"),
         )
 
-        def handleResendAction(action: Action, data):
-            CLIENT.pulseEmitter(f"{self.id}:updated", self.parShape.buildData())
-            return
-
-        resendAction = Action(
-            id=f"{self.id}:resend",
-            name=f"Resend {self.sequence.name}",
-            targetId=self.id,
-            schema=None,
-            serviceId=self.instance.serviceId,
-            handler=handleResendAction,
-        )
-
-        return [setAction, resendAction]
+        # Resend is server-driven now (inbound ResendEmitterValue), not an action.
+        return [setAction]
 
     def _buildChangeKeys(self):
         changeKeys = [makeEmitterChangeKey(self.ownerComp, self.sequence.name)]
@@ -77,7 +72,7 @@ class SequenceTarget(TouchTarget):
 
         setEmitter = Emitter(
             id=f"{self.id}:updated",
-            name=f"{self.sequence.name} Updated",
+            name=self.sequence.name,
             targetId=self.id,
             serviceId=self.instance.serviceId,
             schema=schema,

@@ -55,6 +55,12 @@ class TargetStatus(MItem):
 		self.instanceId = instanceId
 
 
+def makeWriterRef(emitterId: str, role: str = "canonical") -> dict:
+	"""Build an Action.writesTo WriterRef. Wire shape is camelCase with a
+	lowercase role: {"emitterId": ..., "role": "canonical"|"aux"}."""
+	return {"emitterId": emitterId, "role": role}
+
+
 class Action(MItem):
 	def __init__(
 		self,
@@ -65,6 +71,7 @@ class Action(MItem):
 		schema: any,
 		handler: Callable[[Self, Dict[str, any]], None],
 		schemaLayout: any = None,
+		writesTo: dict | None = None,
 	):
 		super().__init__(id, name)
 		self.schema = schema
@@ -72,6 +79,11 @@ class Action(MItem):
 		self.targetId = targetId
 		self.serviceId = serviceId
 		self.handler = handler
+		# writesTo turns this action into a property's canonical/aux writer. It is
+		# skip-if-None on the wire, so only set the attribute when present (an
+		# attribute set to None would serialize as "writesTo": null, not omitted).
+		if writesTo is not None:
+			self.writesTo = writesTo
 
 
 class Emitter(MItem):
@@ -294,6 +306,9 @@ class ExecClient:
 		self.webRtcConnections: Dict[str, str] = {}
 		self.queryHandlers: Dict[str, callable] = {}
 		self.reportHandlers: Dict[str, callable] = {}
+		# emitterId -> callable returning the emitter's current value. Used to seed
+		# property values and to answer the server's ResendEmitterValue command.
+		self.emitterValueProviders: Dict[str, callable] = {}
 
 	def setSend(self, send):
 		self.send = send
@@ -334,6 +349,8 @@ class ExecClient:
 
 			if event == 'ws:m:command':
 				self.parseCommand(data)
+			elif event == 'ws:m:event':
+				self.parseEvent(data)
 			elif event == 'ws:m:query-response':
 				self.parseQueryResponse(data)
 			elif event == 'ws:m:query-error':
@@ -411,8 +428,30 @@ class ExecClient:
 				self.handleIncomingExecTargetAction('ExecTargetAction', wrapped_action_command)
 		elif commandId == 'CompactBatchTargetAction':
 			self.handleCompactBatchTargetAction(commandId, command)
+		elif commandId == 'ResendEmitterValue':
+			self.handleResendEmitterValue(command)
 		else:
 			self.log(f'Unhandled commandId: {commandId}')
+
+	def parseEvent(self, data):
+		"""Inbound MEvent-style frames (itemType + item). Currently only used for
+		the server-driven ResendEmitterValue command, which misty-hornet's spec
+		describes as riding this envelope rather than the ws:m:command path."""
+		itemType = data.get('itemType', None)
+		item = data.get('item', {}) or {}
+		if itemType == 'ResendEmitterValue':
+			self.handleResendEmitterValue(item)
+		else:
+			self.log(f'Unhandled event itemType: {itemType}')
+
+	def handleResendEmitterValue(self, payload: dict):
+		"""Server asks us to re-pulse a property emitter's current value."""
+		emitterId = payload.get('emitterId', None)
+		if emitterId is None:
+			self.log('ResendEmitterValue missing emitterId')
+			return
+		op.RS_LOG.Debug(f'[ExecClient]: ResendEmitterValue for {emitterId}')
+		self.resendEmitterValue(emitterId)
 
 	def handleCompactBatchTargetAction(self, commandId: str, command: dict):
 		tx = command.get('tx', '')
@@ -581,6 +620,35 @@ class ExecClient:
 		if actionId in self.handlers:
 			op.RS_LOG.Info('removing handler for', actionId)
 			del self.handlers[actionId]
+
+	# region property emitter values
+
+	def clearEmitterValueProviders(self):
+		self.emitterValueProviders.clear()
+
+	def saveEmitterValueProvider(self, emitterId: str, provider: Callable[[], any]):
+		"""Register a callable that returns an emitter's current value, keyed by
+		emitter id (used for property seeding and ResendEmitterValue)."""
+		self.emitterValueProviders[emitterId] = provider
+
+	def resendEmitterValue(self, emitterId: str):
+		"""Re-pulse one emitter's current value, if we have a provider for it."""
+		provider = self.emitterValueProviders.get(emitterId, None)
+		if provider is None:
+			self.log(f'No emitter value provider for {emitterId}')
+			return
+		data = provider()
+		if data is None:
+			return
+		self.pulseEmitter(emitterId, data)
+
+	def seedEmitterValues(self):
+		"""Pulse every registered property emitter's current value. Called on each
+		(re)connect so the server has reconciliation ground-truth."""
+		for emitterId in list(self.emitterValueProviders.keys()):
+			self.resendEmitterValue(emitterId)
+
+	# endregion property emitter values
 
 
 CLIENT = ExecClient()

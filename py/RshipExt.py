@@ -188,10 +188,20 @@ class RshipExt:
 
 	def _onConnected(self):
 		"""Edge action: runs once each time the socket becomes healthy
-		(DISCONNECTED -> CONNECTED). Pushes the full project state + current values."""
+		(DISCONNECTED -> CONNECTED). Re-registers the project, then seeds property
+		values so the server has fresh reconciliation ground-truth."""
 		CLIENT.setSend(self.websocketOp.sendText)
 		op.RS_LOG.Info("[RshipExt]: Connected to Rship Server at " + str(self.websocketOp.par.netaddress.eval()))
-		self.refreshProjectData(sendEmitterValues=True)
+		self.refreshProjectData()
+		self.seedProperties()
+
+	def seedProperties(self):
+		"""Pulse every property emitter's current value. This is the property seed
+		(reconciliation ground-truth), run on every (re)connect. Distinct from the
+		retired 'send all emitter values' flag; the server can also pull individual
+		values on demand via the inbound ResendEmitterValue command."""
+		CLIENT.setSend(self.websocketOp.sendText)
+		CLIENT.seedEmitterValues()
 
 	def _sendWsPing(self):
 		"""Send a websocket ping frame. The server's pong routes back through
@@ -277,7 +287,8 @@ class RshipExt:
 		self.sentTargetStatuses.clear()
 		self.cookTargetList()
 		if self._ensureInstance() and self.conn.isConnected:
-			self.refreshProjectData(sendEmitterValues=True)
+			self.refreshProjectData()
+			self.seedProperties()
 		else:
 			op.RS_LOG.Warning("[RshipExt]: ResendAll while not connected - reconnecting")
 			self.conn.reconcile()
@@ -405,8 +416,8 @@ class RshipExt:
 
 # region Project Management
 
-	def refreshProjectData(self, sendEmitterValues=False):
-		op.RS_LOG.Info(f"[RshipExt]: >>> refreshProjectData (sendEmitterValues={sendEmitterValues})")
+	def refreshProjectData(self):
+		op.RS_LOG.Info("[RshipExt]: >>> refreshProjectData")
 		if not self._ensureInstance():
 			op.RS_LOG.Warning("[RshipExt]: No machine id yet, skipping refresh")
 			return
@@ -414,7 +425,7 @@ class RshipExt:
 		self.buildTargets()
 
 		if self.conn.isConnected:
-			self.sendProjectData(sendEmitterValues=sendEmitterValues)
+			self.sendProjectData()
 		else:
 			op.RS_LOG.Warning("[RshipExt]: Not connected to Rship Server, will reconnect")
 			self.conn.reconcile()
@@ -477,7 +488,7 @@ class RshipExt:
 
 # region ws senders
 
-	def sendProjectData(self, sendEmitterValues = False):
+	def sendProjectData(self):
 		if self.instance is None:
 			op.RS_LOG.Error("[RshipExt]: Instance is not set, cannot send project data")
 			return
@@ -499,6 +510,7 @@ class RshipExt:
 		self.allTouchTargets = {target.id: target for target in allTouchTargets}
 		self.emitterIndex.clear()
 		self.emitterHandlers.clear()
+		CLIENT.clearEmitterValueProviders()
 
 		op.RS_LOG.Info(f"[RshipExt]: Sending {len(allTargets)} targets, {len(allActions)} actions, {len(allEmitters)} emitters")
 		self.updateStatsPage(
@@ -532,6 +544,10 @@ class RshipExt:
 				self.emitterIndex[changeKey] = emitter
 				self.emitterHandlers[changeKey] = emitter.handler
 
+			# Register the value provider by emitter id for property seeding and
+			# server-driven ResendEmitterValue.
+			CLIENT.saveEmitterValueProvider(emitter.id, emitter.handler)
+
 			del emitter.handler  # Remove handler from emitter to avoid circular references
 			del emitter.changeKey
 			if hasattr(emitter, 'changeKeys'):
@@ -539,15 +555,8 @@ class RshipExt:
 			events.append(CLIENT.buildSetEvent(emitter))
 
 		CLIENT.sendEventBatch(events)
-
-		if not sendEmitterValues:
-			return
-
-		for key, handler in self.emitterHandlers.items():
-			emitter = self.emitterIndex.get(key, None)
-			if (emitter is not None) and (handler is not None):
-				data = handler()
-				CLIENT.pulseEmitter(emitter.id, data)
+		# Property seeding (pulsing current values) is now an explicit step done by
+		# the caller via seedProperties(), not a flag on this send path.
 
 
 	def PulseEmitter(self, opPath: str, parName: str):

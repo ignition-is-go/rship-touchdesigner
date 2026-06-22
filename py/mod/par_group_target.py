@@ -1,5 +1,5 @@
 from datetime import datetime, timezone
-from exec import Target, Action, Emitter, Instance
+from exec import Target, Action, Emitter, Instance, makeWriterRef
 from typing import Dict, List
 from par_shape import buildShape
 from target import TouchTarget
@@ -50,30 +50,21 @@ class ParGroupTarget(TouchTarget):
         def handleSetAction(action: Action, data: Dict[str, any]):
             return self.parShape.setData(data)
 
+        # Canonical writer of the {id}:updated property emitter. Pairing the set
+        # action to the emitter via writesTo is what makes this a Property.
         setAction = Action(
             id=f"{self.id}:set",
             name=f"Set {self.parGroup.name}",
             targetId=self.id,
             schema=schema,
             serviceId=self.instance.serviceId,
-            handler=handleSetAction
+            handler=handleSetAction,
+            writesTo=makeWriterRef(f"{self.id}:updated"),
         )
 
-        def handleResendAction(action: Action, data: Dict[str, any]):
-            CLIENT.pulseEmitter(f"{self.id}:updated", self.parShape.buildData())
-            return
-        
-
-        resendAction = Action(
-            id=f"{self.id}:resend",
-            name=f"Resend {self.parGroup.name}",
-            targetId=self.id,
-            schema=None,
-            serviceId=self.instance.serviceId,
-            handler=handleResendAction
-        )
-
-        return [setAction, resendAction]
+        # Resend is no longer a client-invoked action; the server drives it via the
+        # inbound ResendEmitterValue command (handled in exec.py).
+        return [setAction]
 
     def getEmitters(self) -> List[Emitter]:
         """
@@ -87,7 +78,7 @@ class ParGroupTarget(TouchTarget):
 
         setEmitter = Emitter(
             id=f"{self.id}:updated",
-            name=f"{self.parGroup.name} Updated",
+            name=self.parGroup.name,
             targetId=self.id,
             serviceId=self.instance.serviceId,
             schema=schema,
