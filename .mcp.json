@@ -1,0 +1,15 @@
+{
+  "mcpServers": {
+    "touchdesigner": {
+      "command": "cmd",
+      "args": [
+        "/c",
+        "npx",
+        "-y",
+        "touchdesigner-mcp-server@latest",
+        "--stdio",
+        "--port=9981"
+      ]
+    }
+  }
+}
