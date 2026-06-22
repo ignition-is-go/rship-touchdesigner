@@ -1,2 +1,6 @@
 sync.ffs_db
 TDLogs/.log
+
+# Python bytecode
+__pycache__/
+*.py[cod]
