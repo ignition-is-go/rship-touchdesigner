@@ -21,7 +21,7 @@ def onValuesChanged(changes):
 	return
 
 def onPulse(par):
-	me.ext.RshipExt.OnProjectPreSave()
+	me.ext.RshipExt.ResendAll()
 	return
 
 def onExpressionChange(par, val, prev):
