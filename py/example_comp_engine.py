@@ -1,61 +1,51 @@
 """
-Example: a comp engine that REFLECTS a TouchDesigner sequence block into comp-element caps.
+Example: a cross-op, cross-engine comp MIXER spanning two bases.
 
-The operator composes a dynamic, ordered set of "Block" elements in rship; this executor
-materializes them as blocks of the COMP's "Sequence" parameter. The cap list is REFLECTED
-from the sequence block's parameters (one cap per block field, typed from the TD par
-style), so every field is a draggable cap on the element and on_apply writes each cap back
-to that block's par.
+  /rship_source/sources  (SourcesExt) — PRODUCER engine. Kind "source" reflects the base's
+      "Sequence" fields (float, str) as caps; each placed source renders into a block, and
+      its "float" field is exposed as the source's "value" output channel.
 
-All the reflection lives in the framework — comp_engine.SequenceReflector (a two-way
-bridge: refl.caps() for the kind declaration, refl.render(batch) on apply). This extension
-is just the thin wiring. Edit the block's fields in TD then call ext.Republish() to
-re-reflect (the comp element definition updates to match).
+  /rship_source/layers   (LayersExt)  — CONSUMER engine. Kind "layer" reflects the base's
+      "Sequence" fields; "float" is WIRE-FED from a source's "value" output, "rgba" stays a
+      draggable cap.
 
-(Planned: marking some block pars as WIRE-ROUTED inputs — filled by an upstream engine's
-output instead of a cap — with the framework reflecting the rest. The inter-engine routing
-model is being settled with the Unreal executor first.)
+The operator wires source.value -> layer.float; the layer's float par binds (par.expr) to the
+source's float par on the OTHER base — cross-op, cross-engine PAR-TO-PAR, tracked by TD's cook
+graph (change a source's float, the layer follows, frame-rate handled by TD).
 
-Put on a Base COMP that has a custom sequence parameter "Sequence":
-  Extension 1         = op('./SeqEngineExt').module.SeqEngineExt(me)
+All the ceremony — reflect the sequence, build the kind (caps/inputs/outputs), register, host,
+declare the engine, and the render/output-binding handler — lives in the framework helper
+comp_engine.sequence_manager(). A producer/consumer extension is then just kind + name + the
+wired/outputs distinction.
+
+Setup per base (the DAT is file-synced to this file; pick the matching class):
+  Extension 1 = op('./compengine').module.SourcesExt(me)     # on /rship_source/sources
+  Extension 1 = op('./compengine').module.LayersExt(me)      # on /rship_source/layers
   Promote Extension 1 = On
 
 APIs: op.RSHIP.Api (rship) + op.RSHIP.CompEngine (comp engine).
 """
 
-SEQUENCE_NAME = "Sequence"
 
-
-class SeqEngineExt:
+class SourcesExt:
+    """Producer: each source -> a Sequence block; its 'float' field is exposed as 'value'."""
     def __init__(self, ownerComp):
         self.ownerComp = ownerComp
-        self._ce = op.RSHIP.CompEngine
-        self._rship = op.RSHIP.Api
-        self._build()
-
-    def _build(self):
-        ce = self._ce
-        host = self._rship.target(self.ownerComp, "Sequence Demo")
-        self.refl = ce.SequenceReflector(self.ownerComp, SEQUENCE_NAME)
-
-        ext = self
-        class BlockHandler(ce.KindHandler):
-            def on_apply(self, ctx, batch):
-                ext.refl.render(batch)          # ordered placement -> sequence blocks
-
-        kind = (ce.KindDefBuilder("seq.block", "Block", "CompElementClipPayload")
-                .instanceability(ce.Instanceability.INSTANCEABLE)
-                .instance_ordering(ce.InputOrdering.ORDERED)
-                .caps(self.refl.caps())         # caps ARE the reflected block fields
-                .build())
-        reg = ce.KindRegistryBuilder().register_with_handler(kind, BlockHandler()).build()
-        self.engine = ce.comp_engine(self.ownerComp, ce.CompEngineArgs(
-            short_id="seq-engine", display_name="Sequence Engine",
-            kind_registry=reg, host_target=host))
+        self.refl, self.engine = op.RSHIP.CompEngine.sequence_manager(
+            ownerComp, kind="source", engine_name="Sources", outputs={"value": "float"})
 
     def Republish(self):
-        """Re-reflect the block fields and re-declare the engine — call after editing the
-        block's parameters in TD so the comp element definition picks up the new caps."""
-        self._build()
-        op.RS_LOG.Info(f"[SeqEngineExt]: re-reflected block -> caps "
-                       f"{[c.custom_id for c in self.refl.caps()]}")
+        self.__init__(self.ownerComp)
+
+
+class LayersExt:
+    """Consumer: 'float' is wire-fed from a source's 'value' output; other fields are caps."""
+    def __init__(self, ownerComp):
+        self.ownerComp = ownerComp
+        ce = op.RSHIP.CompEngine
+        self.refl, self.engine = ce.sequence_manager(
+            ownerComp, kind="layer", engine_name="Layers",
+            wired={"float": ce.WireInput(["source"], "value")})
+
+    def Republish(self):
+        self.__init__(self.ownerComp)

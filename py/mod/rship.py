@@ -274,6 +274,26 @@ def target(ownerComp, name, *, short_id=None, category="python") -> "TargetProxy
     _mark_dirty()
     return proxy
 
+
+def prune_dead() -> typing.List["TargetProxy"]:
+    """Remove targets whose owner COMP was deleted from the registry, returning them so the
+    caller can mark them OFFLINE on the server. Deleting a base does NOT auto-clean its
+    td-anchored registration, so without this a removed target re-publishes as online every
+    connect."""
+    reg = _state()['registry']
+    dead = []
+    for key, proxy in list(reg.items()):
+        try:
+            alive = proxy.ownerComp is not None and proxy.ownerComp.valid
+        except Exception:
+            alive = False
+        if not alive:
+            dead.append(proxy)
+            del reg[key]
+    if dead:
+        _mark_dirty()
+    return dead
+
 # endregion registry
 
 

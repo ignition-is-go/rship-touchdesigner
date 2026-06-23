@@ -29,6 +29,7 @@ import dataclasses
 import typing
 
 import td
+import tdu
 
 from exec import CLIENT, Action, Emitter, Status, Target, makeWriterRef
 
@@ -226,6 +227,7 @@ class KindDefBuilder:
     def trigger(self, t: TriggerDef): self._k.trigger_schema.append(t); return self
     def output_channel(self, oc: OutputChannelDef): self._k.output_channels.append(oc); return self
     def input(self, i: InputDef): self._k.inputs.append(i); return self
+    def inputs(self, inputdefs): self._k.inputs.extend(inputdefs); return self
     def singleton(self): self._k.instanceability = Instanceability.SINGLETON; return self
     def instanceability(self, v): self._k.instanceability = v; return self
     def instance_ordering(self, v): self._k.instance_ordering = v; return self
@@ -274,30 +276,54 @@ def _components(v, n) -> list:
     return [float(x) if isinstance(x, (int, float)) else x for x in vals]
 
 
+class WireInput:
+    """Marks a sequence block field as filled by WIRE-ROUTING (a comp-engine input)
+    instead of a draggable cap. Its value comes from an upstream producer's output channel
+    wired in by the operator, resolved LOCALLY on apply/tick (no value travels):
+
+        SequenceReflector(owner, "Sequence", wired={
+            "float3": WireInput(accepts_kinds=["seq.source"], channel="value"),
+        })
+
+    Wires say WHO feeds the field (topology); per-producer weights, if any, arrive as
+    input caps on the value plane. fan_in=True accepts multiple producers (blend yourself)."""
+    def __init__(self, accepts_kinds, channel, *, fan_in=False,
+                 ordering=InputOrdering.UNORDERED, blend="weighted",
+                 required_min=None, capacity=None):
+        self.accepts_kinds = list(accepts_kinds)
+        self.channel = channel
+        self.fan_in = fan_in
+        self.ordering = ordering
+        self.blend = blend
+        self.required_min = required_min
+        self.capacity = capacity
+
+
 class SequenceReflector:
-    """Two-way bridge between a TD sequence's block parameters and comp-engine caps.
+    """Two-way bridge between a TD sequence's block parameters and comp-engine caps/inputs.
 
-    Reflects each block field into one cap (typed from the TD par style) for the kind
-    declaration, and writes cap values back into a placed block's parameters on apply:
+    Reflects each block field into a cap (typed from the TD par style) for the kind
+    declaration, and writes values back into a placed block's parameters on apply:
 
-        refl = comp_engine.SequenceReflector(ownerComp, "Sequence")
+        refl = comp_engine.SequenceReflector(ownerComp, "Sequence",
+                                             wired={"float3": WireInput(["seq.source"], "value")})
         kind = (KindDefBuilder("seq.block", "Block", "CompElementClipPayload")
                 .instanceability(Instanceability.INSTANCEABLE)
                 .instance_ordering(InputOrdering.ORDERED)
-                .caps(refl.caps())                  # caps ARE the reflected block fields
+                .caps(refl.caps())        # non-wired fields -> draggable caps
                 .build())
+        for i in refl.inputs():           # wired fields -> comp-engine inputs
+            kind ... (KindDefBuilder.input(i))   # see _build below
         ...
         def on_apply(self, ctx, batch):
-            refl.render(batch)                      # ordered placement -> sequence blocks
+            refl.render(batch)            # caps from cap values; wired fields from resolved upstream output
 
-    Call refl.refresh() after editing the block's parameters in TD to re-reflect the
-    cap list. (Wire-routed fields — block pars filled by an upstream engine's output
-    rather than a cap — are a planned extension; the routing model is being settled with
-    the Unreal executor before wiring it in.)
-    """
-    def __init__(self, owner, sequence_name):
+    Mark a field wired via `wired={field: WireInput(...)}`; everything else reflects as a
+    cap. Call refresh() (or rebuild) after editing the block's parameters in TD."""
+    def __init__(self, owner, sequence_name, wired=None):
         self.owner = owner
         self.sequence_name = sequence_name
+        self._wired_spec = dict(wired or {})
         self.refresh()
 
     @property
@@ -305,43 +331,71 @@ class SequenceReflector:
         return self.owner.seq[self.sequence_name]
 
     def refresh(self):
-        """(Re)reflect the block-0 template fields into cap + writer descriptors."""
+        """(Re)reflect block-0 template fields into cap-field or wired-input descriptors."""
         prefix = f"{self.sequence_name}0"
-        self._fields = []
+        self._cap_fields = []
+        self._wire_fields = []
         for pg in self.sequence.blockParGroups:
             if not pg.name.startswith(prefix):
                 continue
             field = pg.name[len(prefix):]                       # e.g. "float3"
             suffixes = [m.name[len(prefix):] for m in pg]       # e.g. ["float2r","float2g",...]
-            self._fields.append({
-                "cap_id": field,
-                "suffixes": suffixes,
-                "cap": cap_from_par_group(pg, cap_id=field),
-            })
+            spec = self._wired_spec.get(field)
+            if spec is not None:
+                self._wire_fields.append({
+                    "pin_id": field, "suffixes": suffixes, "spec": spec,
+                    "input": InputDef(id=field, display_name=(pg.label or field),
+                                      accepts_kinds=spec.accepts_kinds, accepts_channel=spec.channel,
+                                      fan_in=spec.fan_in, ordering=spec.ordering, blend=spec.blend,
+                                      required_min=spec.required_min, capacity=spec.capacity),
+                })
+            else:
+                self._cap_fields.append({
+                    "cap_id": field, "suffixes": suffixes,
+                    "cap": cap_from_par_group(pg, cap_id=field),
+                })
         return self
 
     def caps(self) -> list:
-        return [f["cap"] for f in self._fields]
+        return [f["cap"] for f in self._cap_fields]
+
+    def inputs(self) -> list:
+        return [f["input"] for f in self._wire_fields]
 
     def render(self, batch):
-        """Materialize an ordered batch of placed instances as sequence blocks, writing
-        each cap value back to its block parameter(s)."""
+        """Materialize an ordered batch as sequence blocks: cap fields from cap values,
+        wired fields from the resolved upstream producer output."""
         ordered = sorted(batch, key=lambda ka: (ka.order_index if ka.order_index is not None else 0))
-        self.sequence.numBlocks = len(ordered)
+        if self.sequence.numBlocks != len(ordered):       # only resize on actual change (avoid block churn)
+            self.sequence.numBlocks = len(ordered)
         for i, ka in enumerate(ordered):
-            self.write_block(i, ka.caps)
+            for f in self._cap_fields:
+                self._write_field(i, f["suffixes"], ka.caps.get(f["cap_id"]))
+            for f in self._wire_fields:
+                self._bind_wire(i, f, ka.wire_inputs)
+        return ordered      # block-ordered batch, so a producer can map block index -> instance
 
-    def write_block(self, i, caps: dict):
-        for f in self._fields:
-            v = caps.get(f["cap_id"])
-            if v is None:
-                continue
-            sufs = f["suffixes"]
-            if len(sufs) > 1:                                   # Color/Vec -> spread components
-                for suf, c in zip(sufs, _components(v, len(sufs))):
-                    self._set(f"{self.sequence_name}{i}{suf}", c)
-            else:
-                self._set(f"{self.sequence_name}{i}{sufs[0]}", v)
+    def _blend(self, values, spec):
+        """Combine resolved fan-in values for one pin. Single source -> its value. Default
+        fan-in -> mean of present numeric values; override per kind for richer blends.
+        (Blend is advisory metadata; the executor composites — per the wire protocol.)"""
+        vals = [v for v in values if v is not None]
+        if not vals:
+            return None
+        if len(vals) == 1 or not spec.fan_in:
+            return vals[0]
+        if all(isinstance(v, (int, float)) for v in vals):
+            return sum(vals) / len(vals)
+        return vals[-1]
+
+    def _write_field(self, i, suffixes, v):
+        if v is None:
+            return
+        if len(suffixes) > 1:                                   # Color/Vec -> spread components
+            for suf, c in zip(suffixes, _components(v, len(suffixes))):
+                self._set(f"{self.sequence_name}{i}{suf}", c)
+        else:
+            self._set(f"{self.sequence_name}{i}{suffixes[0]}", v)
 
     def _set(self, par_name, value):
         p = self.owner.par[par_name]
@@ -355,6 +409,38 @@ class SequenceReflector:
             except Exception:
                 pass
 
+    def _bind_wire(self, i, f, wire_inputs):
+        """Bind a wire-fed field's par to its producer(s)' LIVE output via a TD expression
+        (resolve_ref). TD evaluates it every frame — it reads the source output channel's
+        actual current value, nothing fabricated — and we only (re)set the expression on
+        apply/topology change, never per frame. Single-par fields; unbound -> constant."""
+        sufs = f["suffixes"]
+        refs = [e.get("source") for e in (wire_inputs or [])
+                if e.get("pinId") == f["pin_id"] and e.get("source")]
+        if not refs or len(sufs) != 1:
+            for suf in sufs:                                    # unbound (or multi-component) -> constant
+                self._set_constant(f"{self.sequence_name}{i}{suf}")
+            return
+        par_name = f"{self.sequence_name}{i}{sufs[0]}"
+        exprs = [b for b in (resolve_binding(r) for r in refs) if b]
+        if not exprs:                                           # producer(s) not registered yet
+            self._set_constant(par_name)
+            return
+        expr = exprs[0] if len(exprs) == 1 else "(" + " + ".join(f"({e} or 0)" for e in exprs) + ")"
+        self._set_expr(par_name, expr)
+
+    def _set_expr(self, par_name, expr):
+        p = self.owner.par[par_name]
+        if p is None:
+            return
+        p.expr = expr                                           # setting .expr auto-enters EXPRESSION mode
+        p.mode = ParMode.EXPRESSION
+
+    def _set_constant(self, par_name):
+        p = self.owner.par[par_name]
+        if p is not None and p.mode != ParMode.CONSTANT:
+            p.mode = ParMode.CONSTANT
+
 # endregion
 
 
@@ -366,8 +452,21 @@ class KindAssignment:
     instance: dict          # {"compElementId":.., "instanceTag":..}
     caps: dict              # {cap_id: value}  (current value-plane bag)
     presence: float
-    wire_inputs: list       # [WireInputEntry]
+    wire_inputs: list       # [WireInputEntry] raw {pinId, source: CrossEngineRef}
     order_index: int | None = None
+    # Resolved wire inputs, grouped by pin, in fan-in (wireInputValues) order — the
+    # framework resolves each CrossEngineRef against the local output registry before
+    # on_apply. {pinId: [value, ...]}. Empty for an unbound pin.
+    resolved_inputs: dict = dataclasses.field(default_factory=dict)
+
+    def inputs(self, pin_id) -> list:
+        """All resolved values wired into `pin_id`, in fan-in order (blend yourself)."""
+        return self.resolved_inputs.get(pin_id, [])
+
+    def input1(self, pin_id, default=None):
+        """First resolved value for a single-source input (default if unbound/cleared)."""
+        vals = self.resolved_inputs.get(pin_id, [])
+        return vals[0] if vals and vals[0] is not None else default
 
 
 class PrepReport:
@@ -387,6 +486,19 @@ class ApplyCtx:
 
     def emit_output(self, instance: dict, channel: str, value):
         self.engine._emit_output(instance, channel, value)
+
+    def resolve(self, ref):
+        """Resolve a single CrossEngineRef to its producer's current output (local
+        registry); None if unresolved. Usually you read ka.inputs(pin)/input1(pin)
+        instead — the framework pre-resolves wire inputs before on_apply."""
+        return resolve_ref(ref)
+
+    def bind_output(self, instance: dict, channel: str, expr: str):
+        """Expose this instance's output as a TD reference EXPRESSION (e.g. the par that
+        holds its value, "me.par.Source0value") for native par-to-par binding: a wired
+        consumer binds its par directly to it, so TD's cook graph tracks the producer par."""
+        register_output_expr(self.engine.id, instance, channel, expr)
+
 
 
 class KindHandler:
@@ -453,6 +565,126 @@ def _engines() -> dict:
 def get_engines() -> list:
     return list(_engines().values())
 
+
+def prune_dead_engines() -> list:
+    """Remove engines whose owner COMP was deleted from the registry, returning them so the
+    caller can mark their Target OFFLINE (a deleted base otherwise re-publishes its engine
+    as online every connect — same td-anchored-registry staleness as rship targets)."""
+    out = []
+    for key, eng in list(_engines().items()):
+        try:
+            alive = eng.ownerComp is not None and eng.ownerComp.valid
+        except Exception:
+            alive = False
+        if not alive:
+            out.append(eng)
+            del _engines()[key]
+    return out
+
+
+# --- cross-engine output registry: a producer registers a placed instance's current
+# output value here; a consumer resolves CrossEngineRefs against it LOCALLY (no value
+# travels over wires — comp-engine-wire-protocol §7-§11). td-anchored so resolve works
+# across module epochs and across every engine in this process (refs are same-process in v1).
+def _outputs() -> dict:
+    o = getattr(td, "_rship_outputs", None)
+    if o is None:
+        o = {}
+        td._rship_outputs = o
+    return o
+
+
+def _output_key(engine_id, instance, channel) -> tuple:
+    # instance None => engine-level (singleton/aggregator) ref; else element-level.
+    if instance is None:
+        return (engine_id, None, channel)
+    return (engine_id, (instance.get("compElementId"), instance.get("instanceTag", "")), channel)
+
+
+def register_output(engine_id, instance, channel, value):
+    """Expose a producer instance's current output VALUE for cross-engine resolve. Stored in a
+    tdu.Dependency so a bound consumer par EXPRESSION participates in TD's cook/dependency
+    system: reading dep.val in the expression registers the dependency, and setting it here
+    marks those expressions dirty -> TD re-cooks them. (A plain dict is invisible to TD's
+    change detection, so the consumer would NOT update when the producer's value changes.)"""
+    key = _output_key(engine_id, instance, channel)
+    o = _outputs()
+    dep = o.get(key)
+    if dep is None:
+        o[key] = tdu.Dependency(value)
+    elif dep.val != value:
+        dep.val = value     # marks dependent expressions dirty -> re-cook
+
+
+def resolve_ref(ref) -> typing.Any:
+    """Resolve a CrossEngineRef to the producer's current output VALUE. Reading the
+    tdu.Dependency's .val here — when called from inside a consumer's par expression —
+    registers a TD dependency, so the expression re-cooks when the producer emits a new
+    value. None if unresolved or if the producer exposed a reference instead of a value."""
+    if not ref:
+        return None
+    entry = _outputs().get(_output_key(
+        ref.get("sourceEngineId"), ref.get("sourceInstance"), ref.get("outputChannelId")))
+    return entry.val if isinstance(entry, tdu.Dependency) else None
+
+
+class OutputExpr:
+    """Marks a producer output as living at a TD parameter/op the consumer can reference
+    DIRECTLY. `expr` is a real TD reference (e.g. a sequence block par, "me.par.Source0value"),
+    NOT a fabricated signal — so binding a consumer par to it is native par-to-par: TD's cook
+    graph tracks the producer par with no tdu.Dependency bridge needed."""
+    __slots__ = ("expr",)
+
+    def __init__(self, expr):
+        self.expr = str(expr)
+
+    def __eq__(self, other):
+        return isinstance(other, OutputExpr) and other.expr == self.expr
+
+    def __repr__(self):
+        return f"OutputExpr({self.expr!r})"
+
+
+_reprojecting = {"active": False}
+
+
+def register_output_expr(engine_id, instance, channel, expr):
+    """Expose a producer instance's output as a TD reference EXPRESSION (e.g. the par that
+    holds its value) for native par-to-par binding. If the reference CHANGED (e.g. the
+    producer reordered to a new block index, so its value now lives at a different par),
+    re-project wire-driven consumers so they re-bind to the new reference. Reference changes
+    are topology-rare (reorder/placement), so this never runs per frame."""
+    key = _output_key(engine_id, instance, channel)
+    o = _outputs()
+    new = OutputExpr(expr)
+    if o.get(key) == new:
+        return
+    o[key] = new
+    if _reprojecting["active"]:
+        return
+    _reprojecting["active"] = True
+    try:
+        for eng in get_engines():
+            eng.tick()
+    finally:
+        _reprojecting["active"] = False
+
+
+def resolve_binding(ref) -> typing.Optional[str]:
+    """The par expression a wired consumer should bind to. If the producer exposed a TD
+    reference (register_output_expr / ctx.bind_output) -> that reference directly (par-to-par,
+    natively cook-tracked). Otherwise -> a resolve_ref() call reading the tdu.Dependency-backed
+    value. None if the producer isn't registered yet (consumer falls back to a constant)."""
+    entry = _outputs().get(_output_key(
+        ref.get("sourceEngineId"), ref.get("sourceInstance"), ref.get("outputChannelId")))
+    if entry is None:
+        return None
+    # None-safe: a producer momentarily missing (mid re-solve / teardown) resolves to 0
+    # rather than erroring a numeric par (the "missing -> treat as clear" rule).
+    if isinstance(entry, OutputExpr):
+        return f"({entry.expr} or 0)"
+    return f"(op.RSHIP.CompEngine.resolve_ref({ref!r}) or 0)"
+
 # endregion
 
 
@@ -472,13 +704,69 @@ def comp_engine(ownerComp, args: CompEngineArgs) -> "CompEngineProxy":
     key = f"{ownerComp.path}:{args.short_id}"
     proxy = CompEngineProxy(ownerComp, args, key)
     _engines()[key] = proxy
-    # reuse rship's dirty flag so RshipExt re-publishes
+    # reuse rship's dirty flag so RshipExt re-publishes. Use op.RSHIP.Api (global) rather
+    # than `import rship`, which only resolves for DATs inside the rship comp.
     try:
-        import rship
-        rship._mark_dirty()
+        op.RSHIP.Api._mark_dirty()
     except Exception:
         pass
     return proxy
+
+
+def _engine_slug(name: str) -> str:
+    return "".join(c if c.isalnum() else "-" for c in str(name).lower()).strip("-") or "engine"
+
+
+def _field_schema(refl, sequence, field):
+    """WellKnown schema for a sequence field, so an output channel matches its TD par type."""
+    pg = next((p for p in refl.sequence.blockParGroups if p.name == f"{sequence}0{field}"), None)
+    return _PAR_STYLE_SCHEMA.get(pg.style, "Scalar") if pg is not None else "Scalar"
+
+
+def sequence_manager(ownerComp, *, kind, engine_name, sequence="Sequence", short_id=None,
+                     kind_label=None, wired=None, outputs=None, host=None,
+                     payload="CompElementClipPayload", ordered=True):
+    """Declare a SEQUENCE MANAGER: a comp engine backed by a TD sequence — the whole ceremony
+    in one call.
+
+    Reflects the sequence block's fields to caps (or to wired INPUTS via
+    wired={field: WireInput(...)}); each placed element renders into a block; and a PRODUCER
+    exposes block fields as output channels via outputs={channelId: fieldBase} (bound as
+    own-op-path par references, for cross-op par-to-par). Returns (reflector, engine).
+
+    Defaults: kind_label = kind.title(); host = an rship target named engine_name;
+    short_id = '<engine_name>-engine' (slugged); INSTANCEABLE + ORDERED."""
+    refl = SequenceReflector(ownerComp, sequence, wired=wired)
+    outs = dict(outputs or {})
+
+    class _Handler(KindHandler):
+        def on_apply(self, ctx, batch):
+            ordered_batch = refl.render(batch)                 # render caps + wired fields
+            for chan, field in outs.items():                   # producer: expose block fields as outputs
+                for i, ka in enumerate(ordered_batch):
+                    ctx.bind_output(ka.instance, chan,
+                                    f"op({ownerComp.path!r}).par.{sequence}{i}{field}")
+
+    builder = (KindDefBuilder(kind, kind_label or kind.title(), payload)
+               .instanceability(Instanceability.INSTANCEABLE)
+               .caps(refl.caps()))
+    if ordered:
+        builder.instance_ordering(InputOrdering.ORDERED)
+    if refl.inputs():
+        builder.inputs(refl.inputs())
+    for chan, field in outs.items():
+        builder.output_channel(OutputChannelDef(chan, chan.title(),
+                                                _field_schema(refl, sequence, field), "signal"))
+    reg = KindRegistryBuilder().register_with_handler(builder.build(), _Handler()).build()
+
+    if host is None:
+        # op.RSHIP.Api (global) — NOT `import rship`, which only resolves for DATs inside
+        # the rship comp; sequence_manager is called from arbitrary bases.
+        host = op.RSHIP.Api.target(ownerComp, engine_name)
+    engine = comp_engine(ownerComp, CompEngineArgs(
+        short_id=short_id or f"{_engine_slug(engine_name)}-engine",
+        display_name=engine_name, kind_registry=reg, host_target=host))
+    return refl, engine
 
 
 class CompEngineProxy:
@@ -513,6 +801,11 @@ class CompEngineProxy:
         if h is None:
             return None
         return h if isinstance(h, str) else h.id
+
+    def offline(self):
+        """Mark this engine's Target offline (e.g. its owner base was deleted)."""
+        if self.instance is not None:
+            CLIENT.setTargetStatus(self.id, self.instance.id, Status.Offline)
 
     # --- publish (ordered stand-up sequence; order matters) ---
     def publish(self):
@@ -617,30 +910,49 @@ class CompEngineProxy:
         return None
 
     # --- render pipeline ---
-    def _batch_by_kind(self, assignment) -> dict:
-        out: typing.Dict[str, list] = {}
-        for slot in assignment.get("slotStates", []):
-            kind_id = slot.get("kind")
-            caps = {c["capId"]: c.get("value") for c in slot.get("capValues", [])}
-            ka = KindAssignment(
-                instance=slot.get("boundInstance", {}),
-                caps=caps,
-                presence=None,   # presence value isn't in slotState; arrives via SetPresence
-                wire_inputs=slot.get("wireInputValues", []),
-                order_index=slot.get("orderIndex"),
-            )
-            out.setdefault(kind_id, []).append(ka)
-        return out
-
     def _inst_key(self, inst: dict) -> tuple:
         return (inst.get("compElementId"), inst.get("instanceTag", ""))
 
-    def _render(self, assignment, transaction_id):
-        gen = assignment.get("generation", 0)
-        ctx = ApplyCtx(self, gen, transaction_id)
+    def _resolve_inputs(self, wire_inputs) -> dict:
+        """Group wireInputValues by pin and resolve each CrossEngineRef LOCALLY, in the
+        server's pre-sorted fan-in order. {pinId: [value, ...]}; None where a producer's
+        resource is momentarily missing (treat as clear — self-heals next tick)."""
+        out: typing.Dict[str, list] = {}
+        for entry in wire_inputs or []:
+            out.setdefault(entry.get("pinId"), []).append(resolve_ref(entry.get("source", {})))
+        return out
 
-        # Register every per-instance entity VERBATIM from the envelope ids, and seed
-        # the value-plane bag. These are standard Actions/Emitters (caps = properties).
+    def _ka_for_slot(self, s) -> KindAssignment:
+        slot = s["slot"]
+        return KindAssignment(
+            instance=slot.get("boundInstance", {}),
+            caps=dict(s["bag"]),
+            presence=s.get("presence"),
+            wire_inputs=slot.get("wireInputValues", []),
+            order_index=slot.get("orderIndex"),
+            resolved_inputs=self._resolve_inputs(slot.get("wireInputValues", [])),
+        )
+
+    def _batch_for_kind(self, kind_id) -> list:
+        """The full current batch for a kind (handler's contract is the COMPLETE
+        assignment), ordered by the kind's own orderIndex. Note: a producer's own
+        orderIndex is its z-order; fan-in blend order lives in each consumer's
+        resolved_inputs sequence, not here."""
+        batch = [self._ka_for_slot(s) for s in self._slots.values()
+                 if s["slot"].get("kind") == kind_id]
+        batch.sort(key=lambda ka: (ka.order_index if ka.order_index is not None else 0))
+        return batch
+
+    def _project_kind(self, kind_id, transaction_id=None):
+        handler = self.args.kind_registry.handlers.get(kind_id)
+        if handler is None:
+            return
+        ctx = ApplyCtx(self, self._committed.get("generation", 0), transaction_id)
+        handler.on_apply(ctx, self._batch_for_kind(kind_id))
+
+    def _render(self, assignment, transaction_id):
+        # Register every per-instance entity VERBATIM from the envelope ids and seed the
+        # value-plane bag (caps = Properties), then project each kind from its full batch.
         new_slots: typing.Dict[tuple, dict] = {}
         for slot in assignment.get("slotStates", []):
             inst = slot.get("boundInstance", {})
@@ -649,27 +961,35 @@ class CompEngineProxy:
             for cv in slot.get("capValues", []):
                 self._register_cap(inst, cv["capId"], cv["actionId"], cv["emitterId"])
                 bag[cv["capId"]] = cv.get("value")
-                # Seed the readback on (re)materialize. FORCE it (don't dedup): the
-                # contract is "empty dedup table at materialize → seed fires for EVERY
-                # cap". A static/default cap (e.g. an un-animated custom cap) gets no
-                # value-plane SetCap, so this seed is its ONLY readback — and an
-                # optimistically-deduped seed that was lost (raced registration / sent
-                # during a connection blip) would otherwise never re-fire.
+                # Forced seed-on-materialize (don't dedup): a static/default cap gets no
+                # value-plane SetCap, so this is its only readback; a lost optimistic seed
+                # would never re-fire. (See _seed_readback.)
                 self._seed_readback(cv["emitterId"], cv.get("value"))
-            # presence (always present per the wire spec)
             if slot.get("presenceActionId"):
                 self._register_presence(inst, slot["presenceActionId"], slot["presenceEmitterId"])
-            # trigger buttons
             for ba in slot.get("buttonActions", []) or []:
                 self._register_button(inst, ba["buttonId"], ba["actionId"])
             new_slots[ik] = {"slot": slot, "bag": bag, "presence": None}
         self._slots = new_slots
 
-        # Hand each kind its batch to render.
-        for kind_id, batch in self._batch_by_kind(assignment).items():
-            handler = self.args.kind_registry.handlers.get(kind_id)
-            if handler is not None:
-                handler.on_apply(ctx, batch)
+        # Persistent slot map => intra-apply slot order doesn't matter, but to resolve
+        # wires within the SAME apply we project PRODUCER kinds (those with output
+        # channels) first so their outputs are registered before consumers resolve. (A
+        # straggler still self-heals on the next per-tick re-projection.)
+        reg = self.args.kind_registry
+        kinds = {s["slot"].get("kind") for s in self._slots.values()}
+        for kind_id in sorted(kinds, key=lambda k: 0 if (reg.get(k) and reg.get(k).output_channels) else 1):
+            self._project_kind(kind_id, transaction_id)
+
+    def tick(self):
+        """Per-tick re-projection of WIRE-DRIVEN instances only: an upstream producer's
+        output changes WITHOUT a re-apply (topology unchanged), so re-resolve refs +
+        re-project every tick. Cap-only instances aren't ticked — they re-project on
+        SetCap/apply. No wire-driven slots => no-op (cheap)."""
+        kinds = {s["slot"].get("kind") for s in self._slots.values()
+                 if s["slot"].get("wireInputValues")}
+        for kind_id in kinds:
+            self._project_kind(kind_id)
 
     # --- per-instance value-plane entities (caps = properties) ---
     def _register_cap(self, inst, cap_id, action_id, emitter_id):
@@ -720,36 +1040,20 @@ class CompEngineProxy:
         self._register_action(action_id, f"Fire {button_id}", on_fire)   # no emitter, no reconcile
 
     def _reproject(self, ik):
-        """Re-render after a value-plane change (cap/presence). Re-run on_apply with the
-        FULL current batch for the changed instance's kind — not just that instance. The
-        handler's contract is the complete assignment for the kind (e.g. a sequence
-        handler sets numBlocks = len(batch)), so every sibling must be re-projected from
-        its current bag, ordered by orderIndex."""
-        slot = self._slots.get(ik)
-        if slot is None:
-            return
-        kind_id = slot["slot"].get("kind")
-        handler = self.args.kind_registry.handlers.get(kind_id)
-        if handler is None:
-            return
-        batch = [
-            KindAssignment(
-                instance=s["slot"].get("boundInstance", {}),
-                caps=dict(s["bag"]),
-                presence=s.get("presence"),
-                wire_inputs=s["slot"].get("wireInputValues", []),
-                order_index=s["slot"].get("orderIndex"),
-            )
-            for s in self._slots.values()
-            if s["slot"].get("kind") == kind_id
-        ]
-        batch.sort(key=lambda ka: (ka.order_index if ka.order_index is not None else 0))
-        ctx = ApplyCtx(self, self._committed.get("generation", 0), None)
-        handler.on_apply(ctx, batch)
+        """Re-project on a value-plane change (cap/presence) — re-run on_apply with the
+        FULL kind batch (the handler's contract is the complete assignment for the kind,
+        e.g. a sequence handler sets numBlocks = len(batch)), not just the changed slot."""
+        s = self._slots.get(ik)
+        if s is not None:
+            self._project_kind(s["slot"].get("kind"))
 
     def _emit_output(self, inst, channel, value):
         eid = f"{self.id}:output:{inst.get('compElementId')}:{inst.get('instanceTag','')}:{channel}"
         self._register_emitter(eid, channel)
+        # consumption path: expose this instance's current output for cross-engine resolve
+        # (local registry; no value travels over the wire). Engine-level (singleton)
+        # producers register under instance=None — pass None as inst there.
+        register_output(self.id, inst, channel, value)
         self._pulse_readback(eid, value)
 
     # --- low-level register/pulse (sends to server via CLIENT) ---

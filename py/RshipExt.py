@@ -475,6 +475,12 @@ class RshipExt:
 		# Merge user-registered Python targets (the rship.target(...) API). They
 		# implement the TouchTarget interface so they flow through the normal
 		# send/seed lifecycle; inject the instance so their ids can resolve.
+		# First: a deleted base leaves a stale td-anchored registration — mark its
+		# target OFFLINE and drop it, so it isn't re-published as online on connect.
+		for proxy in rship.prune_dead():
+			proxy.instance = self.instance
+			CLIENT.setTargetOffline(proxy.id, self.instance.id)
+			op.RS_LOG.Info("[RshipExt]: removed target (base deleted) ->", proxy.id, "offline")
 		for proxy in rship.get_targets():
 			proxy.instance = self.instance
 			self.opTargets[proxy.id] = proxy
@@ -578,7 +584,11 @@ class RshipExt:
 
 		# Stand up opt-in comp engines via their ordered publish sequence (target ->
 		# emitters -> actions -> CompEngine entity -> initial pulse) — not part of the
-		# generic target batch above.
+		# generic target batch above. First mark engines whose base was deleted offline.
+		for dead in comp_engine.prune_dead_engines():
+			dead.instance = self.instance
+			dead.offline()
+			op.RS_LOG.Info("[RshipExt]: removed comp engine (base deleted) ->", dead.id, "offline")
 		for engine in comp_engine.get_engines():
 			engine.instance = self.instance
 			engine.publish()
