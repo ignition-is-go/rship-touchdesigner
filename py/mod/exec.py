@@ -1,5 +1,6 @@
 from datetime import datetime, timezone
 import json
+import td
 from enum import Enum
 from typing import Callable, Dict, List, Self
 
@@ -651,4 +652,18 @@ class ExecClient:
 	# endregion property emitter values
 
 
-CLIENT = ExecClient()
+def _shared_client() -> ExecClient:
+	# Anchor the single ExecClient on the process-global `td` module. TD duplicates
+	# DAT modules (including this one) across compile/reinit epochs, so a plain
+	# module-global `CLIENT = ExecClient()` yields multiple clients — and inbound
+	# dispatch (handlers) + outbound (providers) would split across them. The td
+	# anchor guarantees every `from exec import CLIENT` resolves to one instance,
+	# which is essential now that comp_engine registers handlers off the wire.
+	c = getattr(td, '_rship_client', None)
+	if c is None:
+		c = ExecClient()
+		td._rship_client = c
+	return c
+
+
+CLIENT = _shared_client()

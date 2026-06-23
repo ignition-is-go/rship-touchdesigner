@@ -26,6 +26,7 @@ from target import TouchTarget
 from util import makeEmitterChangeKey
 from connection import ConnectionManager, ConnState
 import rship
+import comp_engine
 
 # region ExecInfo
 
@@ -59,6 +60,7 @@ class RshipExt:
 		# anywhere in the project can use it (bare `import rship` only resolves for
 		# DATs inside this comp). Same module instance we use -> shares CLIENT/registry.
 		self.Api = rship
+		self.CompEngine = comp_engine     # op.RSHIP.CompEngine — the comp-engine API
 		self.findTargetsOp = self.ownerComp.op('find_targets')
 
 		self.websocketOp = self.ownerComp.op('websocket')
@@ -573,6 +575,14 @@ class RshipExt:
 			events.append(CLIENT.buildSetEvent(emitter))
 
 		CLIENT.sendEventBatch(events)
+
+		# Stand up opt-in comp engines via their ordered publish sequence (target ->
+		# emitters -> actions -> CompEngine entity -> initial pulse) — not part of the
+		# generic target batch above.
+		for engine in comp_engine.get_engines():
+			engine.instance = self.instance
+			engine.publish()
+
 		# Property seeding (pulsing current values) is now an explicit step done by
 		# the caller via seedProperties(), not a flag on this send path.
 
