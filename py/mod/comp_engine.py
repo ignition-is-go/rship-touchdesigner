@@ -320,15 +320,52 @@ class SequenceReflector:
 
     Mark a field wired via `wired={field: WireInput(...)}`; everything else reflects as a
     cap. Call refresh() (or rebuild) after editing the block's parameters in TD."""
-    def __init__(self, owner, sequence_name, wired=None):
+    def __init__(self, owner, sequence_name, wired=None, length_par=None):
         self.owner = owner
         self.sequence_name = sequence_name
         self._wired_spec = dict(wired or {})
+        # Auto par holding the TRUE placed count (see render). Derived from the sequence name
+        # so it's UNIQUE per sequence — a base may host several engines (several sequences),
+        # and TD requires custom par names to be unique on a COMP. Note: TD custom par names
+        # must be uppercase-first then lowercase/digits only, so the suffix is lowercase.
+        self._length_name = length_par or f"{sequence_name}length"
         self.refresh()
+        self._ensure_length_par()
 
     @property
     def sequence(self):
         return self.owner.seq[self.sequence_name]
+
+    def _ensure_length_par(self):
+        """A TD sequence must have >= 1 block, so numBlocks can't represent an empty (or
+        N-element) comp-engine stack faithfully. Expose a read-only Int par holding the TRUE
+        placed count (0..N); downstream logic reads THIS, not numBlocks. Created next to the
+        sequence (idempotent)."""
+        if not self._length_name:
+            return None
+        # tolerant lookup — TD may canonicalize the par name's casing on creation
+        p = self.owner.par[self._length_name] or next(
+            (q for q in self.owner.customPars if q.name.lower() == self._length_name.lower()), None)
+        if p is None:
+            seq = self.sequence
+            page = None
+            try:
+                sp = seq.sequencePar
+                page = sp.page if sp is not None else None
+            except Exception:
+                page = None
+            if page is None:
+                page = next((pg for pg in self.owner.customPages if pg.name == "Comp Engine"), None) \
+                    or self.owner.appendCustomPage("Comp Engine")
+            pg = page.appendInt(self._length_name, label=f"{self.sequence_name} Length")
+            p = self.owner.par[self._length_name] or (pg[0] if pg is not None else None)
+            try:
+                p.readOnly = True           # engine-driven, not hand-edited
+            except Exception:
+                pass
+        if p is not None:
+            self._length_name = p.name      # cache the actual (canonical) name
+        return p
 
     def refresh(self):
         """(Re)reflect block-0 template fields into cap-field or wired-input descriptors."""
@@ -366,8 +403,16 @@ class SequenceReflector:
         """Materialize an ordered batch as sequence blocks: cap fields from cap values,
         wired fields from the resolved upstream producer output."""
         ordered = sorted(batch, key=lambda ka: (ka.order_index if ka.order_index is not None else 0))
-        if self.sequence.numBlocks != len(ordered):       # only resize on actual change (avoid block churn)
-            self.sequence.numBlocks = len(ordered)
+        n = len(ordered)
+        # Publish the TRUE placed count (0..N) on the stack-length par. TD can't have 0 blocks,
+        # so numBlocks is clamped to >=1 (a placeholder block when empty) — downstream reads
+        # the length par, not numBlocks.
+        lp = self._ensure_length_par()
+        if lp is not None and lp.eval() != n:
+            lp.val = n
+        blocks = max(1, n)
+        if self.sequence.numBlocks != blocks:              # only resize on actual change (avoid block churn)
+            self.sequence.numBlocks = blocks
         for i, ka in enumerate(ordered):
             for f in self._cap_fields:
                 self._write_field(i, f["suffixes"], ka.caps.get(f["cap_id"]))
@@ -724,7 +769,7 @@ def _field_schema(refl, sequence, field):
 
 
 def sequence_manager(ownerComp, *, kind, engine_name, sequence="Sequence", short_id=None,
-                     kind_label=None, wired=None, outputs=None, host=None,
+                     kind_label=None, wired=None, outputs=None, host=None, length_par=None,
                      payload="CompElementClipPayload", ordered=True):
     """Declare a SEQUENCE MANAGER: a comp engine backed by a TD sequence — the whole ceremony
     in one call.
@@ -736,7 +781,7 @@ def sequence_manager(ownerComp, *, kind, engine_name, sequence="Sequence", short
 
     Defaults: kind_label = kind.title(); host = an rship target named engine_name;
     short_id = '<engine_name>-engine' (slugged); INSTANCEABLE + ORDERED."""
-    refl = SequenceReflector(ownerComp, sequence, wired=wired)
+    refl = SequenceReflector(ownerComp, sequence, wired=wired, length_par=length_par)
     outs = dict(outputs or {})
 
     class _Handler(KindHandler):
@@ -893,6 +938,8 @@ class CompEngineProxy:
     def _handle_apply(self, action, data):
         env = data or {}
         assignment = env.get("targetState", {"slotStates": [], "overflow": [], "generation": 0})
+        op.RS_LOG.Info(f"[CompEngine] {self.id} INBOUND apply gen={assignment.get('generation')} "
+                       f"slots={len(assignment.get('slotStates', []))}")
         self._render(assignment, env.get("transactionId"))
         self._committed = assignment
         CLIENT.pulseEmitter(self._rid("committed_state"), assignment)
@@ -953,6 +1000,7 @@ class CompEngineProxy:
     def _render(self, assignment, transaction_id):
         # Register every per-instance entity VERBATIM from the envelope ids and seed the
         # value-plane bag (caps = Properties), then project each kind from its full batch.
+        prev_kinds = {s["slot"].get("kind") for s in self._slots.values()}   # for teardown of vacated kinds
         new_slots: typing.Dict[tuple, dict] = {}
         for slot in assignment.get("slotStates", []):
             inst = slot.get("boundInstance", {})
@@ -977,7 +1025,12 @@ class CompEngineProxy:
         # channels) first so their outputs are registered before consumers resolve. (A
         # straggler still self-heals on the next per-tick re-projection.)
         reg = self.args.kind_registry
-        kinds = {s["slot"].get("kind") for s in self._slots.values()}
+        # Project the UNION of previously- and currently-present kinds: a kind whose instances
+        # ALL vacated (including an empty apply -> no kinds present) must still be projected so
+        # its handler runs with an EMPTY batch and tears down its TD representation (e.g. the
+        # SequenceReflector collapses to numBlocks=1 / length 0). Without this a 2->0 apply
+        # leaves the kind's last render stale.
+        kinds = {s["slot"].get("kind") for s in self._slots.values()} | prev_kinds
         for kind_id in sorted(kinds, key=lambda k: 0 if (reg.get(k) and reg.get(k).output_channels) else 1):
             self._project_kind(kind_id, transaction_id)
 

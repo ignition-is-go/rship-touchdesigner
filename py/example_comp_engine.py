@@ -45,7 +45,7 @@ class LayersExt:
         ce = op.RSHIP.CompEngine
         self.refl, self.engine = ce.sequence_manager(
             ownerComp, kind="layer", engine_name="Layers",
-            wired={"float": ce.WireInput(["source"], "value")})
+            wired={"float": ce.WireInput(["source"], "value", required_min=1)})
 
     def Republish(self):
         self.__init__(self.ownerComp)
