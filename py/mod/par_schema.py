@@ -26,6 +26,15 @@ def well_known(type_name, **extra):
     return {"kind": "WellKnown", "value": value}
 
 
+def custom(json_schema):
+    """An rship Custom SchemaRef wrapping an inline JSON Schema: {"kind":"Custom","value":...}.
+    Lossless but GENERIC — the server renders per-field editors (an {r,g,b,a} object collapses
+    to a Color widget, but there's no bespoke typed widget; that's the WellKnown path). Cap
+    values stay opaque (schema is for typing/rendering only, no validation). Prefer WellKnown,
+    then DECOMPOSE; reach for Custom only when a par shape can't decompose cleanly."""
+    return {"kind": "Custom", "value": json_schema}
+
+
 # TD par style -> well-known type name (None => no canonical well-known; use inline_schema).
 # Corrected against the authoritative catalog: RGB is a Color (alpha defaulted to 1), and
 # the Vec family has ONLY Vec3 — XY/XYZW/UV/UVW/WH have no well-known type.
@@ -86,6 +95,14 @@ def inline_schema(par_group):
     if keys is None:                                    # unknown -> permissive
         return {}
     return {"type": "object", "properties": {k: {"type": "number"} for k in keys}}
+
+
+def custom_schema_ref(par_group):
+    """A Custom (inline-JSON) SchemaRef for this par — the LOSSLESS generic fallback when no
+    well-known type fits and decomposition isn't desired. None for a trigger (no value)."""
+    if is_trigger(par_group):
+        return None
+    return custom(inline_schema(par_group))
 
 
 def read(par_group):

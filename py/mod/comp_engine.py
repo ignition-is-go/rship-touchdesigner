@@ -248,13 +248,16 @@ def cap_from_par_group(par_group, *, cap_id=None, label=None, prep=PrepClass.IMM
     """Reflect a TD ParGroup into a SINGLE comp-engine cap, typed from the par style via the
     unified reflector (par_schema): Float->Scalar, Int->Int, Toggle->Bool, RGB/RGBA->Color,
     XYZ->Vec3, Menu->EnumOf(menuNames), Str/File->String. Multi-component styles with no
-    well-known type (XY/XYZW/UV/UVW/WH — no Vec2/Vec4) have no single-cap representation, since
-    a cap's schema_ref is WellKnown-only; SequenceReflector DECOMPOSES those into one scalar
-    cap per component instead. This helper only meets them if called directly, where a lone
-    Scalar is a lossy last resort."""
+    well-known type (XY/XYZW/UV/UVW/WH — no Vec2/Vec4) have no single WellKnown cap; the
+    SequenceReflector DECOMPOSES those into one scalar cap per component (best UX). If this
+    helper meets such a style directly it falls back to a Custom (inline-JSON) schema_ref —
+    lossless, generic widget."""
     cap_id = cap_id or par_group.name
     label = label if label is not None else (par_group.label or cap_id)
-    ref = par_schema.schema_ref(par_group) or schema("Scalar")
+    # WellKnown if one fits, else a Custom (inline-JSON) ref — both LOSSLESS, never a lossy
+    # Scalar collapse. (SequenceReflector decomposes multi-component fields before reaching
+    # here; this Custom path only bites a direct call on a no-well-known style.)
+    ref = par_schema.schema_ref(par_group) or par_schema.custom_schema_ref(par_group)
     return custom_cap(cap_id, ref, label=label, prep=prep)
 
 
@@ -796,9 +799,11 @@ def _engine_slug(name: str) -> str:
 
 
 def _field_schema(refl, sequence, field):
-    """WellKnown schema for a sequence field, so an output channel matches its TD par type."""
+    """Schema for a sequence field's output channel — WellKnown if one fits, else a Custom
+    (inline-JSON) ref; both lossless, never a lossy Scalar collapse. None if the field is
+    missing (a misconfigured output — surfaces rather than masks)."""
     pg = next((p for p in refl.sequence.blockParGroups if p.name == f"{sequence}0{field}"), None)
-    return (par_schema.schema_ref(pg) if pg is not None else None) or schema("Scalar")
+    return (par_schema.schema_ref(pg) or par_schema.custom_schema_ref(pg)) if pg is not None else None
 
 
 def sequence_manager(ownerComp, *, kind, engine_name, sequence="Sequence", short_id=None,
