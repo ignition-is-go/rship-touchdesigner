@@ -461,11 +461,11 @@ class RshipExt:
 
 		foundOps: Dict[str, OPTarget] = {}
 
-		# Phase-2 flag: when set, reflect each tagged COMP through the consolidated
-		# rship.reflect_comp (one function replacing the 4 TouchTarget subclasses), which is
-		# byte-identical to OPTarget/Page/ParGroup/Sequence (verified via wire-diff). Default
-		# off -> legacy path. Flip: op('/rship_source/rship').store('rship_use_reflect', True).
-		useReflect = self.ownerComp.fetch('rship_use_reflect', False)
+		# Phase-2: reflect each tagged COMP through the consolidated rship.reflect_comp (one
+		# function replacing the 4 TouchTarget subclasses), byte-identical to OPTarget/Page/
+		# ParGroup/Sequence (wire-diffed 20/20 + server-verified by malcolm:rship). DEFAULT now
+		# reflect_comp; emergency revert to the legacy classes: store('rship_use_reflect', False).
+		useReflect = self.ownerComp.fetch('rship_use_reflect', True)
 
 		for o in ops:
 			opTarget = rship.reflect_comp(o, self.instance) if useReflect else OPTarget(o, self.instance)
