@@ -70,13 +70,17 @@ def is_trigger(par_group) -> bool:
 def schema_ref(par_group):
     """The rship WELL-KNOWN value SchemaRef for this par, or None when it has no well-known
     VALUE type. None for: a TRIGGER (Pulse/Momentary — no value at all; route it as a
-    trigger/action), and the no-well-known multi-component styles (XY/XYZW/UV/UVW/WH —
+    trigger/action), and the no-well-known multi-component styles (XY/4-comp XYZW/UV/UVW/WH —
     caller decomposes or inlines). Menu -> EnumOf(menu values)."""
     if is_trigger(par_group):
         return None
     style = par_group.style
     if style == "Menu":
         return well_known("EnumOf", variants=list(par_group[0].menuNames))
+    # The vec family maps by ACTUAL component count: TD lets an XYZ/XYZW group hold 3 members
+    # (x,y,z), which IS a Vec3 regardless of the style name carrying a 'w'.
+    if style in ("XYZ", "XYZW") and len(par_group) == 3:
+        return well_known("Vec3")
     wk = _WELL_KNOWN.get(style)
     return well_known(wk) if wk else None
 
@@ -91,7 +95,12 @@ def inline_schema(par_group):
         return {"type": "string", "enum": list(par_group[0].menuNames)}
     if style in _SCALAR_INLINE:
         return dict(_SCALAR_INLINE[style])
-    keys = ["r", "g", "b", "a"] if style in ("RGB", "RGBA") else _COMPONENTS.get(style)
+    if style in ("RGB", "RGBA"):
+        keys = ["r", "g", "b", "a"]                     # Color shape always carries alpha
+    else:
+        keys = _COMPONENTS.get(style)
+        if keys is not None:
+            keys = keys[:len(par_group)]                # honor actual component count (XYZW-size-3 -> x,y,z)
     if keys is None:                                    # unknown -> permissive
         return {}
     return {"type": "object", "properties": {k: {"type": "number"} for k in keys}}
