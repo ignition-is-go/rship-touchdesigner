@@ -73,6 +73,7 @@ class Action(MItem):
 		handler: Callable[[Self, Dict[str, any]], None],
 		schemaLayout: any = None,
 		writesTo: dict | None = None,
+		schemaRef: dict | None = None,
 	):
 		super().__init__(id, name)
 		self.schema = schema
@@ -85,6 +86,10 @@ class Action(MItem):
 		# attribute set to None would serialize as "writesTo": null, not omitted).
 		if writesTo is not None:
 			self.writesTo = writesTo
+		# schemaRef (rship WellKnown/Custom SchemaRef) drives the typed widget; takes
+		# precedence over inline schema server-side. Skip-if-None like writesTo.
+		if schemaRef is not None:
+			self.schemaRef = schemaRef
 
 
 class Emitter(MItem):
@@ -97,6 +102,7 @@ class Emitter(MItem):
 		schema: any,
 		changeKey: str,
 		handler: Callable,
+		schemaRef: dict | None = None,
 	):
 		super().__init__(id, name)
 		self.targetId = targetId
@@ -104,6 +110,10 @@ class Emitter(MItem):
 		self.schema = schema
 		self.changeKey = changeKey
 		self.handler = handler
+		# schemaRef (rship WellKnown/Custom SchemaRef) drives the typed widget; precedence
+		# over inline schema server-side. Skip-if-None so it isn't sent as null.
+		if schemaRef is not None:
+			self.schemaRef = schemaRef
 
 
 class Pulse(MItem):

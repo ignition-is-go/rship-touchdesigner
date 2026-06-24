@@ -46,8 +46,10 @@ import typing
 
 import td
 
-from exec import CLIENT, Action, Emitter, Instance, Target, makeWriterRef
+from exec import CLIENT, Action, Emitter, Instance, Stream, Target, makeWriterRef
 from target import TouchTarget
+from util import makeEmitterChangeKey
+import par_schema
 
 
 # region WriteOutcome
@@ -301,15 +303,20 @@ def prune_dead() -> typing.List["TargetProxy"]:
 
 class _Reg:
     """Internal record of a registered action/emitter."""
-    __slots__ = ("name", "short", "schema", "handler", "writesTo", "provider")
+    __slots__ = ("name", "short", "schema", "handler", "writesTo", "provider",
+                 "change_key", "change_keys", "schema_ref")
 
-    def __init__(self, name, short, schema, handler=None, writesTo=None, provider=None):
+    def __init__(self, name, short, schema, handler=None, writesTo=None, provider=None,
+                 change_key=None, change_keys=None, schema_ref=None):
         self.name = name
         self.short = short
         self.schema = schema
         self.handler = handler      # CLIENT-shape: (action, data) -> response  (actions)
         self.writesTo = writesTo    # dict | None  (property writer actions)
         self.provider = provider    # () -> value  (emitters)
+        self.change_key = change_key    # parexec change key (op,par) for par-backed emitters
+        self.change_keys = change_keys  # MULTIPLE keys (a sequence emitter: header + all blocks)
+        self.schema_ref = schema_ref    # rship SchemaRef (WellKnown/Custom) for the typed widget
 
 
 class EmitterProxy:
@@ -334,7 +341,7 @@ class TargetProxy(TouchTarget):
     """A user-defined target. Implements the TouchTarget interface so RshipExt can
     collect it alongside tag-based targets and run the normal send/seed lifecycle."""
 
-    def __init__(self, ownerComp, name, short, category, key):
+    def __init__(self, ownerComp, name, short, category, key, parent=None):
         # NOTE: instance is injected later by RshipExt.buildTargets once known.
         self.instance: Instance | None = None
         self.ownerComp = ownerComp
@@ -342,14 +349,19 @@ class TargetProxy(TouchTarget):
         self.short = short
         self.category = category
         self.key = key
+        self.parent = parent                          # nesting: parent TargetProxy (op->page->par)
+        self._children: typing.List["TargetProxy"] = []
         self._actions: typing.List[_Reg] = []
         self._emitters: typing.Dict[str, _Reg] = {}
+        self._monitor_ops: typing.Set[str] = set()   # op paths backing par() properties
         # required by RshipExt's stream handling on opTargets values:
         self.streamSource = None
 
     # --- identity ---
     @property
     def id(self) -> str:
+        if self.parent is not None:
+            return f"{self.parent.id}:{self.short}"   # nested -> parentId:short
         sid = self.instance.serviceId if self.instance else "td"
         return f"{sid}:{self.short}"
 
@@ -436,12 +448,153 @@ class TargetProxy(TouchTarget):
             return None
         return handler
 
+    # --- par-backed reflection (TD parameter -> rship control via par_schema) ---
+    def par(self, par_group, *, name=None, short_id=None):
+        """Expose a TD ParGroup as an rship control, reflected via par_schema:
+          - a VALUE par -> a PROPERTY: a read emitter the parexec auto-pulses on ANY TD-side
+            change (changeKey = (op, par)), paired with a ParMode-safe writer.
+          - a PULSE/Momentary par -> a no-payload ACTION (a fire), NOT a property.
+        Returns the PropertyProxy (or None for a trigger). The owner op is registered for
+        parexec monitoring (RshipExt.buildTargets reads monitored_ops())."""
+        label = name or _humanize(par_group.name)
+        short = short_id or _slug(par_group.name)
+        self._monitor_ops.add(par_group.owner.path)
+
+        if par_schema.is_trigger(par_group):
+            self._actions.append(_Reg(label, short, {},
+                handler=(lambda action, data, _pg=par_group: par_schema.write(_pg, None))))
+            _mark_dirty()
+            return None
+
+        ref = par_schema.schema_ref(par_group) or par_schema.custom_schema_ref(par_group)
+        inline = par_schema.inline_schema(par_group)
+        proxy = PropertyProxy(self, short)
+        self._emitters[short] = _Reg(
+            label, short, inline, schema_ref=ref,
+            change_key=makeEmitterChangeKey(par_group.owner, par_group.name),
+            provider=(lambda _pg=par_group: _to_jsonable(par_schema.read(_pg))))
+        self._actions.append(_Reg(
+            f"Set {label}", f"{short}-set", inline, schema_ref=ref,
+            handler=self._make_par_writer(short, par_group),
+            writesTo=makeWriterRef(f"__SELF__:{short}")))
+        _mark_dirty()
+        return proxy
+
+    def _make_par_writer(self, emitter_short, par_group):
+        def handler(action, data, _pg=par_group, _short=emitter_short):
+            if par_schema.write(_pg, data):
+                eid = self._child_id(_short)
+                if eid is not None:
+                    CLIENT.pulseEmitter(eid, _to_jsonable(par_schema.read(_pg)))
+            else:
+                op.RS_LOG.Warning(
+                    f"[rship]: par '{_pg.name}' not writable (expression/export/bind mode); write ignored")
+            return None
+        return handler
+
+    def monitored_ops(self) -> typing.Set[str]:
+        """Op paths whose parameters back this target's par() properties — RshipExt adds
+        these to the parexec's monitored ops so a TD-side par change auto-pulses its emitter."""
+        ops = set(self._monitor_ops)
+        for ch in self._children:                  # children's bound ops bubble up
+            ops |= ch.monitored_ops()
+        return ops
+
+    # --- nested targets (op -> page -> par trees) ---
+    def child(self, name, *, short_id=None, category="python"):
+        """Create a NESTED child target under this one (its parentTargets = [self.id]).
+        Children are reached via collectChildren(), not the global registry, so build a tree
+        by calling t.child(...).par(...) etc. Returns the child TargetProxy."""
+        short = short_id or _slug(name)
+        ch = TargetProxy(self.ownerComp, name, short, category, f"{self.key}:{short}", parent=self)
+        self._children.append(ch)
+        _mark_dirty()
+        return ch
+
+    # --- sequence as an array property ---
+    def sequence(self, sequence, *, name=None, short_id=None):
+        """Expose a TD Sequence as an rship array PROPERTY: read = the blocks as a list of
+        field-objects (the emitter watches the header + EVERY block par, so any block change
+        auto-pulses the whole array), write = set the block count + each field. Each field is
+        reflected via par_schema."""
+        seq = sequence
+        owner = seq.owner
+        label = name or _humanize(seq.name)
+        short = short_id or _slug(seq.name)
+        self._monitor_ops.add(owner.path)
+        prefix = f"{seq.name}0"
+        fields = [pg.name[len(prefix):] for pg in seq.blockParGroups if pg.name.startswith(prefix)]
+
+        def block_pg(i, field):
+            return owner.parGroup[f"{seq.name}{i}{field}"]
+
+        item_props = {f: par_schema.inline_schema(block_pg(0, f))
+                      for f in fields if block_pg(0, f) is not None}
+        schema = {"type": "array", "items": {"type": "object", "properties": item_props}}
+
+        def read_blocks():
+            return [{f: par_schema.read(block_pg(i, f)) for f in fields if block_pg(i, f) is not None}
+                    for i in range(seq.numBlocks)]
+
+        def writer(action, data, _short=short):
+            if not isinstance(data, list):
+                return None
+            seq.numBlocks = len(data)
+            for i, bd in enumerate(data):
+                if isinstance(bd, dict):
+                    for f in fields:
+                        if f in bd and block_pg(i, f) is not None:
+                            par_schema.write(block_pg(i, f), bd[f])
+            eid = self._child_id(_short)
+            if eid is not None:
+                CLIENT.pulseEmitter(eid, _to_jsonable(read_blocks()))
+            return None
+
+        cks = [makeEmitterChangeKey(owner, seq.name)] + \
+              [makeEmitterChangeKey(owner, pg.name) for pg in seq.blockParGroups]
+        cks = list(dict.fromkeys(cks))                    # dedup, preserve order
+        proxy = PropertyProxy(self, short)
+        self._emitters[short] = _Reg(label, short, schema, change_key=cks[0], change_keys=cks,
+                                     provider=(lambda: _to_jsonable(read_blocks())))
+        self._actions.append(_Reg(f"Set {label}", f"{short}-set", schema, handler=writer,
+                                  writesTo=makeWriterRef(f"__SELF__:{short}")))
+        _mark_dirty()
+        return proxy
+
+    # --- bulk set (one action spanning several pars) ---
+    def bulk(self, name, par_groups, *, short_id=None):
+        """A bulk-set ACTION over several pars: takes an object {key: value} and writes each
+        (ParMode-safe, via par_schema). Mirrors the tag-based page/op bulk set."""
+        short = short_id or _slug(name)
+        items = {_slug(pg.name): pg for pg in par_groups}
+        schema = {"type": "object", "properties": {k: par_schema.inline_schema(pg) for k, pg in items.items()}}
+        for pg in par_groups:
+            self._monitor_ops.add(pg.owner.path)
+
+        def handler(action, data, _items=items):
+            if isinstance(data, dict):
+                for k, v in data.items():
+                    if k in _items:
+                        par_schema.write(_items[k], v)
+            return None
+        self._actions.append(_Reg(name, short, schema, handler=handler))
+        _mark_dirty()
+        return self
+
+    # --- video stream source ---
+    def stream(self, source):
+        """Mark this target as a video STREAM source (a TOP path or op). The server uses it
+        to establish WebRTC (mirrors the tag-based rship_stream tag)."""
+        self.streamSource = source if isinstance(source, str) else source.path
+        _mark_dirty()
+        return self
+
     # --- TouchTarget interface (consumed by RshipExt.sendProjectData) ---
     def getTarget(self) -> Target:
         return Target(
             id=self.id,
             name=self.name,
-            parentTargets=[],
+            parentTargets=([self.parent.id] if self.parent is not None else []),
             category=self.category,
             serviceId=self.instance.serviceId,
         )
@@ -461,6 +614,7 @@ class TargetProxy(TouchTarget):
                 serviceId=self.instance.serviceId,
                 handler=reg.handler,
                 writesTo=writesTo,
+                schemaRef=reg.schema_ref,
             ))
         return actions
 
@@ -468,22 +622,36 @@ class TargetProxy(TouchTarget):
         emitters = []
         for short, reg in self._emitters.items():
             eid = self._child_id(short)
-            emitters.append(Emitter(
+            em = Emitter(
                 id=eid,
                 name=reg.name,
                 targetId=self.id,
                 serviceId=self.instance.serviceId,
                 schema=reg.schema,
-                changeKey=eid,            # synthetic; user emitters aren't parexec-driven
+                # par-backed emitters carry the real (op,par) change key so the parexec
+                # auto-pulses them; push-only emitters keep the synthetic id key.
+                changeKey=(reg.change_key or eid),
                 handler=reg.provider,
-            ))
+                schemaRef=reg.schema_ref,
+            )
+            # a sequence emitter watches MANY pars (header + every block field); RshipExt
+            # indexes all of these so any block change re-pulses the whole array.
+            if reg.change_keys:
+                em.changeKeys = reg.change_keys
+            emitters.append(em)
         return emitters
 
     def collectChildren(self):
-        return [self]
+        out = [self]
+        for ch in self._children:
+            ch.instance = self.instance          # propagate the instance down the target tree
+            out.extend(ch.collectChildren())
+        return out
 
     def getStreamInfo(self):
-        return None
+        if self.streamSource is None or self.instance is None:
+            return None
+        return Stream(id=f"{self.id}-{self.instance.id}-stream", name=self.name)
 
 # endregion proxies
 

@@ -485,6 +485,23 @@ class RshipExt:
 			proxy.instance = self.instance
 			self.opTargets[proxy.id] = proxy
 
+		# Drive the parexec's monitored ops: every tag-based target COMP plus every op backing
+		# a Python-API par() property. (This list used to be a static par in the .toe; RshipExt
+		# now manages it so par-backed properties AND reflected COMPs get TD-side change
+		# detection — a par change fires onValuesChanged -> PulseEmitter -> the matching emitter.)
+		monitor = set()
+		for t in self.opTargets.values():
+			mo = getattr(t, 'monitored_ops', None)
+			if callable(mo):
+				monitor |= mo()
+			else:
+				oc = getattr(t, 'ownerComp', None)
+				if oc is not None and oc.valid:
+					monitor.add(oc.path)
+		emittersDat = self.ownerComp.op('emitters')
+		if emittersDat is not None and emittersDat.par['ops'] is not None:
+			emittersDat.par.ops = ' '.join(sorted(monitor))
+
 		self.streamSourcesOp.clear()
 		for opTarget in self.opTargets.values():
 			if opTarget.getStreamInfo() is not None and opTarget.streamSource is not None:
