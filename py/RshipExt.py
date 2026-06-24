@@ -21,7 +21,6 @@ import socket
 import json
 
 from exec import CLIENT, Instance, InstanceStatus, Status, Action, Emitter
-from op_target import OPTarget
 from target import TouchTarget
 from util import makeEmitterChangeKey
 from connection import ConnectionManager, ConnState
@@ -95,7 +94,7 @@ class RshipExt:
 
 		self.execInfoRequests = {}
 
-		self.opTargets: Dict[str, OPTarget] = {}
+		self.opTargets: Dict[str, TouchTarget] = {}
 		self.allTouchTargets: Dict[str, TouchTarget] = {}
 
 		self.instance: Instance | None = None
@@ -459,21 +458,14 @@ class RshipExt:
 
 		# op.RS_LOG.Info("[RshipExt]: Found", len(ops), "ops")
 
-		foundOps: Dict[str, OPTarget] = {}
+		foundOps: Dict[str, TouchTarget] = {}
 
-		# Phase-2: reflect each tagged COMP through the consolidated rship.reflect_comp (one
-		# function replacing the 4 TouchTarget subclasses), byte-identical to OPTarget/Page/
-		# ParGroup/Sequence (wire-diffed 20/20 + server-verified by malcolm:rship). DEFAULT now
-		# reflect_comp; emergency revert to the legacy classes: store('rship_use_reflect', False).
-		useReflect = self.ownerComp.fetch('rship_use_reflect', True)
-
+		# Reflect each tagged COMP through the consolidated rship.reflect_comp — one function
+		# that replaced the old OPTarget/PageTarget/ParGroupTarget/SequenceTarget classes. Ids
+		# come from the COMP's stored UUID (survives restarts); schemas via par_shape. Verified
+		# byte-identical (20/20 wire-diff) + server-confirmed before the legacy classes were cut.
 		for o in ops:
-			opTarget = rship.reflect_comp(o, self.instance) if useReflect else OPTarget(o, self.instance)
-
-			if opTarget.id in foundOps and hasattr(opTarget, 'regenerateId'):
-				op.RS_LOG.Warning(f"[RshipExt]: Target with ID {opTarget.id} already exists")
-				opTarget.regenerateId()
-
+			opTarget = rship.reflect_comp(o, self.instance)
 			foundOps[opTarget.id] = opTarget
 
 		self.opTargets = foundOps
