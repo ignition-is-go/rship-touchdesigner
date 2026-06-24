@@ -404,6 +404,11 @@ def reflect_comp(ownerComp, instance) -> "TargetProxy":
     root = TargetProxy(ownerComp, ownerComp.name, ownerComp.name, ownerComp.OPType,
                        f"{ownerComp.path}:reflect", id_override=uid)
     root.instance = instance
+    # every property here is par-backed (changeKey = (ownerComp, parName)), so RshipExt must
+    # add ownerComp to the parexec's monitored ops — otherwise TD-side par changes never fire
+    # PulseEmitter and nothing reconciles. (OPTarget got this implicitly via the ownerComp
+    # fallback; a TargetProxy has monitored_ops(), so we must populate it.)
+    root._monitor_ops.add(ownerComp.path)
 
     pages = [p for p in ownerComp.customPages if p.name != RS_TARGET_INFO_PAGE]   # skip util page
     if "Notch" in ownerComp.pages:
