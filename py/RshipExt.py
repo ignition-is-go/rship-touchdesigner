@@ -461,10 +461,16 @@ class RshipExt:
 
 		foundOps: Dict[str, OPTarget] = {}
 
-		for o in ops:
-			opTarget = OPTarget(o, self.instance)
+		# Phase-2 flag: when set, reflect each tagged COMP through the consolidated
+		# rship.reflect_comp (one function replacing the 4 TouchTarget subclasses), which is
+		# byte-identical to OPTarget/Page/ParGroup/Sequence (verified via wire-diff). Default
+		# off -> legacy path. Flip: op('/rship_source/rship').store('rship_use_reflect', True).
+		useReflect = self.ownerComp.fetch('rship_use_reflect', False)
 
-			if opTarget.id in foundOps:
+		for o in ops:
+			opTarget = rship.reflect_comp(o, self.instance) if useReflect else OPTarget(o, self.instance)
+
+			if opTarget.id in foundOps and hasattr(opTarget, 'regenerateId'):
 				op.RS_LOG.Warning(f"[RshipExt]: Target with ID {opTarget.id} already exists")
 				opTarget.regenerateId()
 

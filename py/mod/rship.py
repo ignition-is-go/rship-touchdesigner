@@ -48,7 +48,9 @@ import td
 
 from exec import CLIENT, Action, Emitter, Instance, Stream, Target, makeWriterRef
 from target import TouchTarget
-from util import makeEmitterChangeKey
+from util import (makeEmitterChangeKey, RS_TARGET_ID_STORAGE_KEY, RS_TARGET_INFO_PAGE,
+                  RS_BUNDLE_COMPLETE_PAR)
+from par_shape import buildShape, SequenceParShape
 import par_schema
 
 
@@ -296,6 +298,175 @@ def prune_dead() -> typing.List["TargetProxy"]:
         _mark_dirty()
     return dead
 
+
+def _seq_change_keys(ownerComp, sequence) -> list:
+    """A sequence emitter's parexec keys: the header + every block's par groups (dedup)."""
+    cks = [makeEmitterChangeKey(ownerComp, sequence.name)]
+    for block in sequence.blocks:
+        for bpg in block:
+            cks.append(makeEmitterChangeKey(ownerComp, bpg.name))
+    return list(dict.fromkeys(cks))
+
+
+def _bulk_entries(page, ownerComp, section_prefix=None) -> list:
+    """Reproduce PageTarget.buildBulkSchemaEntries: ordered {path,label,section,schema} over a
+    page's pars (a Header par sets the running section; a sequence -> its array schema; a par
+    group -> {type:object, properties:...}). Dedup by path."""
+    entries, seen, section = [], set(), None
+    for par in page.pars:
+        if getattr(par, "style", None) == "Header":
+            section = (par.label or par.name)
+            continue
+        pg = getattr(par, "parGroup", None)
+        if pg is None:
+            continue
+        seq = getattr(pg, "sequence", None)
+        if seq is not None:
+            path, label = seq.name, (getattr(seq, "label", None) or seq.name)
+            if path in seen:
+                continue
+            seqPgs = [p for p in page.parGroups if getattr(p, "sequence", None) and p.sequence.name == seq.name]
+            try:
+                node = SequenceParShape(ownerComp, pg, sequenceParGroups=seqPgs).buildSchemaProperties()
+            except Exception:
+                node = None
+        else:
+            path, label = pg.name, (par.label or pg.name)
+            if path in seen:
+                continue
+            try:
+                node = {"type": "object", "properties": buildShape(ownerComp, pg).buildSchemaProperties()}
+            except Exception:
+                node = None
+        if node is None:
+            continue
+        seen.add(path)
+        sec = section
+        if section_prefix:
+            sec = f"{section_prefix} / {section}" if section else section_prefix
+        entries.append({"path": path, "label": label, "section": sec, "schema": node})
+    return entries
+
+
+def _bulk_reg(entries, pages, ownerComp, complete_par=None) -> "_Reg":
+    """The bulk_set action _Reg: schema {path: node} + ordered schemaLayout. The handler writes
+    each path across `pages` then pulses complete_par (behavior only — stripped from the wire)."""
+    properties = {e["path"]: e["schema"] for e in entries}
+    layout = []
+    for e in entries:
+        le = {"path": e["path"]}
+        if e["label"] is not None:
+            le["label"] = e["label"]
+        if e["section"] is not None:
+            le["section"] = e["section"]
+        layout.append(le)
+
+    def handler(action, data, _pages=pages, _own=ownerComp, _cp=complete_par):
+        if not isinstance(data, dict):
+            return None
+        for page in _pages:
+            done = set()
+            for pg in page.parGroups:
+                if pg.style == "Header":
+                    continue
+                seq = getattr(pg, "sequence", None)
+                name = seq.name if seq is not None else pg.name
+                if name in done or data.get(name) is None:
+                    continue
+                done.add(name)
+                try:
+                    if seq is not None:
+                        seqPgs = [p for p in page.parGroups if getattr(p, "sequence", None) and p.sequence.name == seq.name]
+                        SequenceParShape(_own, pg, sequenceParGroups=seqPgs).setData(data[name])
+                    else:
+                        buildShape(_own, pg).setData(data[name])
+                except Exception:
+                    pass
+        if _cp is not None and _own.par[_cp] is not None and _own.par[_cp].isPulse:
+            _own.par[_cp].pulse()
+        return None
+
+    return _Reg("Bulk Set", "bulk_set", {"type": "object", "properties": properties},
+                handler=handler, schema_layout=layout)
+
+
+def reflect_comp(ownerComp, instance) -> "TargetProxy":
+    """Reflect a tagged COMP into a TargetProxy tree IDENTICAL to the legacy tag-based
+    OPTarget/PageTarget/ParGroupTarget/SequenceTarget output, consolidating those 4 classes:
+    root id = the COMP's stored UUID (survives TD restarts), children = UUID:Page / UUID:Par /
+    UUID:Seq, schemas via par_shape (byte-unchanged), set/updated/bulk_set naming. Flag-gated.
+    TODO: stream (getStreamInfo / rship_stream)."""
+    uid = ownerComp.storage.get(RS_TARGET_ID_STORAGE_KEY)
+    if not uid:
+        import uuid as _uuid
+        uid = str(_uuid.uuid4())
+        ownerComp.storage[RS_TARGET_ID_STORAGE_KEY] = uid
+    root = TargetProxy(ownerComp, ownerComp.name, ownerComp.name, ownerComp.OPType,
+                       f"{ownerComp.path}:reflect", id_override=uid)
+    root.instance = instance
+
+    pages = [p for p in ownerComp.customPages if p.name != RS_TARGET_INFO_PAGE]   # skip util page
+    if "Notch" in ownerComp.pages:
+        pages.append(ownerComp.pages["Notch"])
+    op_entries = []
+    for page in pages:
+        pageNode = TargetProxy(ownerComp, page.name, page.name, "Page",
+                               f"{uid}:{page.name}", parent=root, id_override=f"{uid}:{page.name}")
+        root._children.append(pageNode)
+        seen_seq = set()
+        for pg in page.parGroups:
+            if pg.style == "Header":
+                continue
+            seq = getattr(pg, "sequence", None)
+            if seq is not None:                                  # sequence -> array property
+                if seq.name in seen_seq:
+                    continue
+                seen_seq.add(seq.name)
+                seqPgs = [p for p in page.parGroups if getattr(p, "sequence", None) and p.sequence.name == seq.name]
+                try:
+                    sshape = SequenceParShape(ownerComp, pg, sequenceParGroups=seqPgs)
+                    sschema = sshape.buildSchemaProperties()
+                except Exception as e:
+                    op.RS_LOG.Warning(f"[reflect_comp]: skipping sequence {seq.name}: {e}")
+                    continue
+                sqNode = TargetProxy(ownerComp, seq.name, seq.name, "Sequence",
+                                     f"{uid}:{seq.name}", parent=pageNode, id_override=f"{uid}:{seq.name}")
+                eid = f"{uid}:{seq.name}:updated"
+                sqNode._emitters["updated"] = _Reg(
+                    seq.name, "updated", sschema, change_key=makeEmitterChangeKey(ownerComp, seq.name),
+                    change_keys=_seq_change_keys(ownerComp, seq), provider=sshape.buildData)
+
+                def _seqset(a, d, _s=sshape, _eid=eid):
+                    _s.setData(d)
+                    CLIENT.pulseEmitter(_eid, _to_jsonable(_s.buildData()))   # sequence parexec is unreliable
+                    return None
+                sqNode._actions.append(_Reg(f"Set {seq.name}", "set", sschema,
+                                            handler=_seqset, writesTo=makeWriterRef(eid)))
+                pageNode._children.append(sqNode)
+                continue
+            try:                                                 # par group -> property
+                shape = buildShape(ownerComp, pg)
+            except Exception as e:
+                op.RS_LOG.Warning(f"[reflect_comp]: skipping {pg.name} ({pg.style}): {e}")
+                continue
+            schema = {"type": "object", "properties": shape.buildSchemaProperties()}
+            pgNode = TargetProxy(ownerComp, pg.name, pg.name, pg.style,
+                                 f"{uid}:{pg.name}", parent=pageNode, id_override=f"{uid}:{pg.name}")
+            pgNode._emitters["updated"] = _Reg(
+                pg.name, "updated", schema,
+                change_key=makeEmitterChangeKey(ownerComp, pg.name), provider=shape.buildData)
+            pgNode._actions.append(_Reg(
+                f"Set {pg.name}", "set", schema,
+                handler=(lambda a, d, _s=shape: _s.setData(d)),
+                writesTo=makeWriterRef(f"{uid}:{pg.name}:updated")))
+            pageNode._children.append(pgNode)
+        # page-level bulk_set (this page's pars)
+        pageNode._actions.append(_bulk_reg(_bulk_entries(page, ownerComp), [page], ownerComp))
+        op_entries.extend(_bulk_entries(page, ownerComp, section_prefix=page.name))
+    # OP-level bulk_set (every page, sections prefixed by page name)
+    root._actions.append(_bulk_reg(op_entries, pages, ownerComp, complete_par=RS_BUNDLE_COMPLETE_PAR))
+    return root
+
 # endregion registry
 
 
@@ -304,10 +475,10 @@ def prune_dead() -> typing.List["TargetProxy"]:
 class _Reg:
     """Internal record of a registered action/emitter."""
     __slots__ = ("name", "short", "schema", "handler", "writesTo", "provider",
-                 "change_key", "change_keys", "schema_ref")
+                 "change_key", "change_keys", "schema_ref", "schema_layout")
 
     def __init__(self, name, short, schema, handler=None, writesTo=None, provider=None,
-                 change_key=None, change_keys=None, schema_ref=None):
+                 change_key=None, change_keys=None, schema_ref=None, schema_layout=None):
         self.name = name
         self.short = short
         self.schema = schema
@@ -317,6 +488,7 @@ class _Reg:
         self.change_key = change_key    # parexec change key (op,par) for par-backed emitters
         self.change_keys = change_keys  # MULTIPLE keys (a sequence emitter: header + all blocks)
         self.schema_ref = schema_ref    # rship SchemaRef (WellKnown/Custom) for the typed widget
+        self.schema_layout = schema_layout  # Action schemaLayout (bulk_set: ordered path/label/section)
 
 
 class EmitterProxy:
@@ -341,7 +513,7 @@ class TargetProxy(TouchTarget):
     """A user-defined target. Implements the TouchTarget interface so RshipExt can
     collect it alongside tag-based targets and run the normal send/seed lifecycle."""
 
-    def __init__(self, ownerComp, name, short, category, key, parent=None):
+    def __init__(self, ownerComp, name, short, category, key, parent=None, id_override=None):
         # NOTE: instance is injected later by RshipExt.buildTargets once known.
         self.instance: Instance | None = None
         self.ownerComp = ownerComp
@@ -350,6 +522,7 @@ class TargetProxy(TouchTarget):
         self.category = category
         self.key = key
         self.parent = parent                          # nesting: parent TargetProxy (op->page->par)
+        self._id_override = id_override               # explicit id (reflect_comp: the stored UUID scheme)
         self._children: typing.List["TargetProxy"] = []
         self._actions: typing.List[_Reg] = []
         self._emitters: typing.Dict[str, _Reg] = {}
@@ -360,6 +533,8 @@ class TargetProxy(TouchTarget):
     # --- identity ---
     @property
     def id(self) -> str:
+        if self._id_override is not None:
+            return self._id_override                  # explicit (reflect_comp: stored UUID)
         if self.parent is not None:
             return f"{self.parent.id}:{self.short}"   # nested -> parentId:short
         sid = self.instance.serviceId if self.instance else "td"
@@ -615,6 +790,7 @@ class TargetProxy(TouchTarget):
                 handler=reg.handler,
                 writesTo=writesTo,
                 schemaRef=reg.schema_ref,
+                schemaLayout=reg.schema_layout,
             ))
         return actions
 
