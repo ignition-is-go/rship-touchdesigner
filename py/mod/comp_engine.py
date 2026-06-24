@@ -33,6 +33,11 @@ import tdu
 
 from exec import CLIENT, Action, Emitter, Status, Target, makeWriterRef
 
+# Top-level (NOT lazy) so it resolves in comp_engine's OWN module context. A lazy `import
+# par_schema` inside a function resolves relative to the CALLER's op (a base outside rship
+# when these reflect-helpers run from an extension), which fails — same trap as `import rship`.
+import par_schema
+
 
 # region enum string values (snake_case on the wire)
 
@@ -239,27 +244,18 @@ class KindDefBuilder:
 
 # region reflection helpers (TD pars <-> caps) — ergonomic primitives for extension devs
 
-# TD par style -> WellKnown cap schema type. Menu is special-cased (EnumOf w/ variants).
-_PAR_STYLE_SCHEMA = {
-    "Float": "Scalar", "Int": "Int",
-    "Toggle": "Bool", "Pulse": "Bool", "Momentary": "Bool",
-    "RGB": "Vec3", "XYZ": "Vec3", "UV": "Vec3", "WH": "Vec3",
-    "RGBA": "Color", "XYZW": "Color",
-    "Str": "String", "StrMenu": "String", "File": "String", "Folder": "String",
-}
-
-
 def cap_from_par_group(par_group, *, cap_id=None, label=None, prep=PrepClass.IMMEDIATE) -> CapDef:
-    """Reflect a TD ParGroup into a comp-engine cap, typed from the par style:
-    Float->Scalar, Int->Int, Toggle->Bool, RGB/XYZ->Vec3, RGBA->Color, Menu->EnumOf(menuNames),
-    Str->String. Unknown styles fall back to a Scalar (a draggable number)."""
+    """Reflect a TD ParGroup into a SINGLE comp-engine cap, typed from the par style via the
+    unified reflector (par_schema): Float->Scalar, Int->Int, Toggle->Bool, RGB/RGBA->Color,
+    XYZ->Vec3, Menu->EnumOf(menuNames), Str/File->String. Multi-component styles with no
+    well-known type (XY/XYZW/UV/UVW/WH — no Vec2/Vec4) have no single-cap representation, since
+    a cap's schema_ref is WellKnown-only; SequenceReflector DECOMPOSES those into one scalar
+    cap per component instead. This helper only meets them if called directly, where a lone
+    Scalar is a lossy last resort."""
     cap_id = cap_id or par_group.name
     label = label if label is not None else (par_group.label or cap_id)
-    if par_group.style == "Menu":
-        schema_ref = schema("EnumOf", variants=list(par_group[0].menuNames))
-    else:
-        schema_ref = _PAR_STYLE_SCHEMA.get(par_group.style, "Scalar")
-    return custom_cap(cap_id, schema_ref, label=label, prep=prep)
+    ref = par_schema.schema_ref(par_group) or schema("Scalar")
+    return custom_cap(cap_id, ref, label=label, prep=prep)
 
 
 def _components(v, n) -> list:
@@ -329,6 +325,7 @@ class SequenceReflector:
         # and TD requires custom par names to be unique on a COMP. Note: TD custom par names
         # must be uppercase-first then lowercase/digits only, so the suffix is lowercase.
         self._length_name = length_par or f"{sequence_name}length"
+        self._block_index = {}              # inst_key -> block index, for trigger fire routing
         self.refresh()
         self._ensure_length_par()
 
@@ -368,10 +365,11 @@ class SequenceReflector:
         return p
 
     def refresh(self):
-        """(Re)reflect block-0 template fields into cap-field or wired-input descriptors."""
+        """(Re)reflect block-0 template fields into wired-input, trigger, or cap descriptors."""
         prefix = f"{self.sequence_name}0"
         self._cap_fields = []
         self._wire_fields = []
+        self._trigger_fields = []
         for pg in self.sequence.blockParGroups:
             if not pg.name.startswith(prefix):
                 continue
@@ -386,6 +384,24 @@ class SequenceReflector:
                                       fan_in=spec.fan_in, ordering=spec.ordering, blend=spec.blend,
                                       required_min=spec.required_min, capacity=spec.capacity),
                 })
+            elif par_schema.is_trigger(pg):
+                # Pulse/Momentary is a FIRE input, not a value -> a comp-engine trigger (fire
+                # button) that pulses the block par on press (see fire()). NOT a cap.
+                self._trigger_fields.append({
+                    "field": field,
+                    "trigger": TriggerDef(id=field, display_name=(pg.label or field)),
+                })
+            elif par_schema.schema_ref(pg) is None and len(suffixes) > 1:
+                # Multi-component field with no well-known type (XY/XYZW/UV/UVW/WH — no
+                # Vec2/Vec4) has no single-cap representation (cap schema_ref is WellKnown-
+                # only). DECOMPOSE into one typed scalar cap per component — lossless, and
+                # each component gets a proper slider. (Petition Vec2/Vec4 to recombine.)
+                comp = "Int" if pg.style == "WH" else "Scalar"
+                for m, suf in zip(pg, suffixes):
+                    self._cap_fields.append({
+                        "cap_id": suf, "suffixes": [suf],
+                        "cap": custom_cap(suf, schema(comp), label=(m.label or suf)),
+                    })
             else:
                 self._cap_fields.append({
                     "cap_id": field, "suffixes": suffixes,
@@ -399,11 +415,28 @@ class SequenceReflector:
     def inputs(self) -> list:
         return [f["input"] for f in self._wire_fields]
 
+    def triggers(self) -> list:
+        return [f["trigger"] for f in self._trigger_fields]
+
+    def fire(self, instance, field):
+        """A trigger fired (button_id == field): pulse the matching par on the block that
+        currently holds `instance`. No-op if the instance isn't placed or field isn't a par."""
+        key = (instance.get("compElementId"), instance.get("instanceTag", ""))
+        i = self._block_index.get(key)
+        if i is None:
+            return
+        p = self.owner.par[f"{self.sequence_name}{i}{field}"]
+        if p is not None:
+            p.pulse()
+
     def render(self, batch):
         """Materialize an ordered batch as sequence blocks: cap fields from cap values,
         wired fields from the resolved upstream producer output."""
         ordered = sorted(batch, key=lambda ka: (ka.order_index if ka.order_index is not None else 0))
         n = len(ordered)
+        # block index per instance, so a fired trigger can pulse the right block's par (fire())
+        self._block_index = {(ka.instance.get("compElementId"), ka.instance.get("instanceTag", "")): i
+                             for i, ka in enumerate(ordered)}
         # Publish the TRUE placed count (0..N) on the stack-length par. TD can't have 0 blocks,
         # so numBlocks is clamped to >=1 (a placeholder block when empty) — downstream reads
         # the length par, not numBlocks.
@@ -765,7 +798,7 @@ def _engine_slug(name: str) -> str:
 def _field_schema(refl, sequence, field):
     """WellKnown schema for a sequence field, so an output channel matches its TD par type."""
     pg = next((p for p in refl.sequence.blockParGroups if p.name == f"{sequence}0{field}"), None)
-    return _PAR_STYLE_SCHEMA.get(pg.style, "Scalar") if pg is not None else "Scalar"
+    return (par_schema.schema_ref(pg) if pg is not None else None) or schema("Scalar")
 
 
 def sequence_manager(ownerComp, *, kind, engine_name, sequence="Sequence", short_id=None,
@@ -792,6 +825,9 @@ def sequence_manager(ownerComp, *, kind, engine_name, sequence="Sequence", short
                     ctx.bind_output(ka.instance, chan,
                                     f"op({ownerComp.path!r}).par.{sequence}{i}{field}")
 
+        def on_button_pressed(self, instance, button_id, data):
+            refl.fire(instance, button_id)                     # trigger (Pulse field) -> pulse the block par
+
     builder = (KindDefBuilder(kind, kind_label or kind.title(), payload)
                .instanceability(Instanceability.INSTANCEABLE)
                .caps(refl.caps()))
@@ -799,6 +835,8 @@ def sequence_manager(ownerComp, *, kind, engine_name, sequence="Sequence", short
         builder.instance_ordering(InputOrdering.ORDERED)
     if refl.inputs():
         builder.inputs(refl.inputs())
+    for t in refl.triggers():
+        builder.trigger(t)
     for chan, field in outs.items():
         builder.output_channel(OutputChannelDef(chan, chan.title(),
                                                 _field_schema(refl, sequence, field), "signal"))
