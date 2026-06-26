@@ -464,7 +464,27 @@ class RshipExt:
 		# that replaced the old OPTarget/PageTarget/ParGroupTarget/SequenceTarget classes. Ids
 		# come from the COMP's stored UUID (survives restarts); schemas via par_shape. Verified
 		# byte-identical (20/20 wire-diff) + server-confirmed before the legacy classes were cut.
+		#
+		# EXCLUDE comp-engine-managed COMPs: a COMP that hosts a comp-engine already publishes its
+		# canonical surface via the CompEngine host target. ALSO building a full tag target for it
+		# double-publishes AND — fatally — re-serializes the comp-engine-owned sequences (e.g. a
+		# field engine's Effector/Generator/Transport blocks) as whole-array tag emitters that
+		# re-emit EVERY FRAME as the engine's animated block pars (wall-clock time, noise
+		# translation, …) tick: the per-frame whole-array emit storm behind the 1fps regression.
+		# The engine owns that data; tag-reflecting it too is pure waste. Key on the COMP
+		# (ownerComp), NOT the target id — the engine host id (…:field-system) differs from the
+		# tag id (the COMP name lx_field_system).
+		ce_owners = set()
+		for e in comp_engine.get_engines():
+			oc = getattr(e, "ownerComp", None)
+			if oc is not None and oc.valid:
+				ce_owners.add(oc.path)
 		for o in ops:
+			if o is None or not o.valid:
+				continue
+			if o.path in ce_owners:
+				op.RS_LOG.Info("[RshipExt]: skip tag-reflect (comp-engine-managed) ->", o.path)
+				continue
 			opTarget = rship.reflect_comp(o, self.instance)
 			foundOps[opTarget.id] = opTarget
 

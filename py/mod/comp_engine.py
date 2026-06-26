@@ -258,7 +258,9 @@ def cap_from_par_group(par_group, *, cap_id=None, label=None, prep=PrepClass.IMM
     # Scalar collapse. (SequenceReflector decomposes multi-component fields before reaching
     # here; this Custom path only bites a direct call on a no-well-known style.)
     ref = par_schema.schema_ref(par_group) or par_schema.custom_schema_ref(par_group)
-    return custom_cap(cap_id, ref, label=label, prep=prep)
+    # reflect the par's DEFAULT alongside its schema so the server seeds newly-placed instances
+    # with the TD-authored defaults (not null).
+    return custom_cap(cap_id, ref, default=par_schema.read_default(par_group), label=label, prep=prep)
 
 
 def _components(v, n) -> list:
@@ -585,6 +587,9 @@ class ApplyCtx:
 class KindHandler:
     """Subclass and implement on_apply. The rest are optional. Note: synchronous —
     TD callbacks aren't async (the Rust SDK trait is async)."""
+    wants_tick = True   # set False when the handler renders ONLY from topology + the value plane
+                        # (no dynamic wire VALUES to re-resolve per frame) — tick() then skips it,
+                        # avoiding a wasteful per-tick rebuild of an identical render.
     def on_apply(self, ctx: ApplyCtx, batch: list):
         raise NotImplementedError("KindHandler.on_apply must be implemented")
 
@@ -596,6 +601,14 @@ class KindHandler:
 
     def on_button_pressed(self, instance: dict, button_id: str, data):
         pass
+
+    def on_value(self, ctx: ApplyCtx, instance: dict, kind_id: str, change: dict):
+        """A SINGLE instance's value plane changed (presence or one cap) — topology UNCHANGED.
+        Default re-runs the full holistic on_apply (correct but O(kind batch) — re-walks/rewrites
+        everything). OVERRIDE to update just this instance's render for an O(1) value update (the
+        common per-frame animation path). change = {"what": "presence"|"cap", "cap_id": <id|None>,
+        "value": <new value>}."""
+        self.on_apply(ctx, ctx.engine._batch_for_kind(kind_id))
 
 # endregion
 
@@ -870,9 +883,19 @@ class CompEngineProxy:
         self.key = key
         # last committed Assignment (the committed_state readback + cold-start gate)
         self._committed = {"slotStates": [], "overflow": [], "generation": 0}
-        # current rendered slots, keyed by instance id "(compElementId, instanceTag)"
+        # current rendered slots (TOPOLOGY), keyed by instance id "(compElementId, instanceTag)".
+        # Holds {"slot": <slotState>, "state": <ref into _inst_state>} — rebuilt every apply.
         self._slots: typing.Dict[tuple, dict] = {}
+        # PERSISTENT per-instance value-plane state (caps + presence), keyed by the SAME instance id
+        # and OWNED here independent of topology. The apply payload carries no presence value and
+        # the server sends cap/presence updates only on CHANGE, so the executor is the authority for
+        # "current value per instance". A topology apply re-binds this onto the current slots (see
+        # _render) so values SURVIVE an unrelated re-apply instead of resetting to None/disabled.
+        self._inst_state: typing.Dict[tuple, dict] = {}          # ik -> {"bag": {capId: val}, "presence": val}
         self._readback_last: typing.Dict[str, typing.Any] = {}   # emitterId -> last pulsed (dedup)
+        self._last_apply_sig = None                              # render-signature of last APPLIED
+                                                                 # assignment (skip render-equivalent
+                                                                 # re-dispatches — see _handle_apply)
 
     # --- identity ---
     @property
@@ -978,12 +1001,35 @@ class CompEngineProxy:
         CLIENT.pulseEmitter(self._rid("prep_report"), report)
         return None
 
+    def _render_sig(self, assignment):
+        """A cheap content signature of the render-RELEVANT parts of an assignment (everything
+        EXCEPT the free-running generation): each instance's id/kind/presence/caps/wires. Two
+        assignments with the same signature render identically, so an apply that only bumps the
+        generation (a re-dispatch, or the trailing applies of a settling cascade) can skip the
+        expensive re-register + full render. Pure Python — far cheaper than a render."""
+        parts = []
+        for s in assignment.get("slotStates", []):
+            inst = s.get("boundInstance", {})
+            caps = tuple(sorted((cv.get("capId"), repr(cv.get("value"))) for cv in s.get("capValues", [])))
+            wires = tuple(sorted((w.get("pinId"),
+                                  (w.get("source") or {}).get("sourceInstance", {}).get("compElementId"))
+                                 for w in (s.get("wireInputValues") or [])))
+            parts.append((inst.get("compElementId"), inst.get("instanceTag", ""),
+                          s.get("kind"), repr(s.get("presence")), caps, wires))
+        return tuple(sorted(parts))
+
     def _handle_apply(self, action, data):
         env = data or {}
         assignment = env.get("targetState", {"slotStates": [], "overflow": [], "generation": 0})
-        op.RS_LOG.Info(f"[CompEngine] {self.id} INBOUND apply gen={assignment.get('generation')} "
-                       f"slots={len(assignment.get('slotStates', []))}")
-        self._render(assignment, env.get("transactionId"))
+        # APPLY DEDUP: the server may re-dispatch the same apply (or a placement cascade may emit
+        # several applies) whose render-relevant content is identical — only the free-running
+        # generation differs. Re-running the re-register + full render for those is pure stall, so
+        # skip _render when the signature is unchanged. Still echo committed_state (cheap) so the
+        # reconcile sees our state regardless.
+        sig = self._render_sig(assignment)
+        if sig != self._last_apply_sig:
+            self._last_apply_sig = sig
+            self._render(assignment, env.get("transactionId"))
         self._committed = assignment
         CLIENT.pulseEmitter(self._rid("committed_state"), assignment)
         return None
@@ -1014,10 +1060,11 @@ class CompEngineProxy:
 
     def _ka_for_slot(self, s) -> KindAssignment:
         slot = s["slot"]
+        st = s["state"]
         return KindAssignment(
             instance=slot.get("boundInstance", {}),
-            caps=dict(s["bag"]),
-            presence=s.get("presence"),
+            caps=dict(st["bag"]),
+            presence=st.get("presence"),
             wire_inputs=slot.get("wireInputValues", []),
             order_index=slot.get("orderIndex"),
             resolved_inputs=self._resolve_inputs(slot.get("wireInputValues", [])),
@@ -1048,20 +1095,41 @@ class CompEngineProxy:
         for slot in assignment.get("slotStates", []):
             inst = slot.get("boundInstance", {})
             ik = self._inst_key(inst)
-            bag = {}
+            # Value state is OWNED per-instance and persists across applies; topology just re-binds
+            # it to the current slot. Re-register the value-plane actions/emitters (their ids may be
+            # re-issued per apply) but OVERLAY values rather than wiping — exactly how caps already
+            # behave, so presence and caps stay consistent.
+            state = self._inst_state.setdefault(ik, {"bag": {}, "presence": None})
             for cv in slot.get("capValues", []):
                 self._register_cap(inst, cv["capId"], cv["actionId"], cv["emitterId"])
-                bag[cv["capId"]] = cv.get("value")
-                # Forced seed-on-materialize (don't dedup): a static/default cap gets no
-                # value-plane SetCap, so this is its only readback; a lost optimistic seed
-                # would never re-fire. (See _seed_readback.)
-                self._seed_readback(cv["emitterId"], cv.get("value"))
+                val = cv.get("value")
+                if val is not None:                          # apply-seeded value (level-triggered):
+                    state["bag"][cv["capId"]] = val          # overlay it and seed the readback. A null
+                    self._seed_readback(cv["emitterId"], val)   # (unchanged / just-placed cap) must NOT
+                else:                                        # wipe a value we already hold for this inst.
+                    state["bag"].setdefault(cv["capId"], None)
             if slot.get("presenceActionId"):
                 self._register_presence(inst, slot["presenceActionId"], slot["presenceEmitterId"])
+            # Presence, treated like a cap: if the apply SEEDS a value (server-side resting presence —
+            # contract C, a "presence" value on the slot) overlay it (level-triggered, authoritative);
+            # otherwise CARRY FORWARD the last-known value. Today's apply is presence-less (edge-
+            # triggered via SetPresence only), so the carry-forward keeps a persisting slot from
+            # resetting to None/dark when an UNRELATED topology change triggers a re-apply.
+            pv = slot.get("presence")
+            if pv is not None:
+                state["presence"] = pv
             for ba in slot.get("buttonActions", []) or []:
                 self._register_button(inst, ba["buttonId"], ba["actionId"])
-            new_slots[ik] = {"slot": slot, "bag": bag, "presence": None}
+            new_slots[ik] = {"slot": slot, "state": state}
         self._slots = new_slots
+        # PRUNE value-state for instances no longer in the topology. Now that contract C re-seeds
+        # caps+presence on every apply, a re-placed instance is repopulated from the apply, so we
+        # needn't retain vacated instances — keeping them leaks _inst_state across scene changes and
+        # holds stale presence. Still-placed instances are in new_slots, so their carry-forward is
+        # untouched; only genuinely-vacated keys are dropped.
+        for _ik in list(self._inst_state.keys()):
+            if _ik not in new_slots:
+                del self._inst_state[_ik]
 
         # Persistent slot map => intra-apply slot order doesn't matter, but to resolve
         # wires within the SAME apply we project PRODUCER kinds (those with output
@@ -1081,10 +1149,15 @@ class CompEngineProxy:
         """Per-tick re-projection of WIRE-DRIVEN instances only: an upstream producer's
         output changes WITHOUT a re-apply (topology unchanged), so re-resolve refs +
         re-project every tick. Cap-only instances aren't ticked — they re-project on
-        SetCap/apply. No wire-driven slots => no-op (cheap)."""
+        SetCap/apply. Handlers with wants_tick=False (render from static topology + the
+        value plane, no dynamic wire values) are skipped — re-projecting them every tick
+        would just rebuild the same render. No wire-driven slots => no-op (cheap)."""
         kinds = {s["slot"].get("kind") for s in self._slots.values()
                  if s["slot"].get("wireInputValues")}
         for kind_id in kinds:
+            handler = self.args.kind_registry.handlers.get(kind_id)
+            if handler is not None and not getattr(handler, "wants_tick", True):
+                continue
             self._project_kind(kind_id)
 
     # --- per-instance value-plane entities (caps = properties) ---
@@ -1092,14 +1165,14 @@ class CompEngineProxy:
         ik = self._inst_key(inst)
 
         def on_set(action, value, _ik=ik, _cap=cap_id, _eid=emitter_id):
-            slot = self._slots.get(_ik)
-            if slot is None:
+            state = self._inst_state.get(_ik)
+            if state is None:
                 return
-            # cap BAG is sole source of truth: same-value early-out, then re-project.
-            if _values_equivalent(slot["bag"].get(_cap), value):
+            # the per-instance bag is sole source of truth: same-value early-out, then re-project.
+            if _values_equivalent(state["bag"].get(_cap), value):
                 return
-            slot["bag"][_cap] = value
-            self._reproject(_ik)
+            state["bag"][_cap] = value
+            self._reproject(_ik, {"what": "cap", "cap_id": _cap, "value": value})
             self._pulse_readback(_eid, value)
 
         self._register_action(action_id, f"Set {cap_id}", on_set, writesTo=makeWriterRef(emitter_id))
@@ -1109,13 +1182,13 @@ class CompEngineProxy:
         ik = self._inst_key(inst)
 
         def on_set(action, value, _ik=ik, _eid=emitter_id):
-            slot = self._slots.get(_ik)
-            if slot is None:
+            state = self._inst_state.get(_ik)
+            if state is None:
                 return
-            if _values_equivalent(slot.get("presence"), value):
+            if _values_equivalent(state.get("presence"), value):
                 return
-            slot["presence"] = value
-            self._reproject(_ik)
+            state["presence"] = value
+            self._reproject(_ik, {"what": "presence", "value": value})
             self._pulse_readback(_eid, value)
 
         self._register_action(action_id, "Set Presence", on_set, writesTo=makeWriterRef(emitter_id))
@@ -1135,13 +1208,20 @@ class CompEngineProxy:
 
         self._register_action(action_id, f"Fire {button_id}", on_fire)   # no emitter, no reconcile
 
-    def _reproject(self, ik):
-        """Re-project on a value-plane change (cap/presence) — re-run on_apply with the
-        FULL kind batch (the handler's contract is the complete assignment for the kind,
-        e.g. a sequence handler sets numBlocks = len(batch)), not just the changed slot."""
+    def _reproject(self, ik, change=None):
+        """Re-render ONE instance on a value-plane change (cap/presence) — topology is UNCHANGED,
+        so route to the handler's on_value, which can update just the changed block (O(1)) instead
+        of re-walking + rewriting the whole kind. Default on_value falls back to a full on_apply,
+        so handlers that don't optimize keep the old holistic behavior. No-op if unplaced."""
         s = self._slots.get(ik)
-        if s is not None:
-            self._project_kind(s["slot"].get("kind"))
+        if s is None:
+            return
+        kind_id = s["slot"].get("kind")
+        handler = self.args.kind_registry.handlers.get(kind_id)
+        if handler is None:
+            return
+        ctx = ApplyCtx(self, self._committed.get("generation", 0), None)
+        handler.on_value(ctx, s["slot"].get("boundInstance", {}), kind_id, change or {})
 
     def _emit_output(self, inst, channel, value):
         eid = f"{self.id}:output:{inst.get('compElementId')}:{inst.get('instanceTag','')}:{channel}"

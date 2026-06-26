@@ -114,21 +114,35 @@ def custom_schema_ref(par_group):
     return custom(inline_schema(par_group))
 
 
-def read(par_group):
-    """Current value in the canonical shape the schema implies: bool/number/integer/string
-    for single pars (Menu -> the menu value string); {r,g,b,a} for Color (RGB defaults a=1);
-    {x,y,z}/{x,y}/{x,y,z,w}/{u,v}/... for the vec family; None for a trigger."""
+def _read(par_group, getter):
+    """Shared shaper for read()/read_default(): pull each member's value via `getter`
+    (.eval() for current, .default for the par default) into the canonical schema shape."""
     style = par_group.style
     if is_trigger(par_group):
         return None
     keys = _COMPONENTS.get(style)
     if keys is None:                                    # single-valued
-        v = par_group[0].eval()
+        v = getter(par_group[0])
         return bool(v) if style == "Toggle" else v
-    vals = {k: float(p.eval()) for k, p in zip(keys, par_group)}
+    vals = {k: float(getter(p)) for k, p in zip(keys, par_group)}
     if style == "RGB":                                  # Color shape carries alpha
         vals["a"] = 1.0
     return vals
+
+
+def read(par_group):
+    """Current value in the canonical shape the schema implies: bool/number/integer/string
+    for single pars (Menu -> the menu value string); {r,g,b,a} for Color (RGB defaults a=1);
+    {x,y,z}/{x,y}/{x,y,z,w}/{u,v}/... for the vec family; None for a trigger."""
+    return _read(par_group, lambda p: p.eval())
+
+
+def read_default(par_group):
+    """The par's DEFAULT value in the SAME canonical shape as read() (each member's .default
+    rather than its current value). Used to seed a comp-engine cap's `default` so the server
+    populates a newly-placed comp-element instance with the TD-authored defaults instead of
+    null. None for a trigger (no value)."""
+    return _read(par_group, lambda p: p.default)
 
 
 def write(par_group, value) -> bool:
@@ -142,6 +156,9 @@ def write(par_group, value) -> bool:
     if is_trigger(par_group):
         members[0].pulse()
         return True
+    if value is None:                                   # no desired value (cap unset, e.g. a freshly
+        return False                                    # placed instance) -> no-op; writing None to a
+                                                        # numeric par throws the cast (matches _set).
     keys = _COMPONENTS.get(par_group.style)
     if keys is None:
         members[0].val = value
