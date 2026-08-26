@@ -52,32 +52,26 @@ class PageTarget(TouchTarget):
         """
 
         def bulk_set_action_handler(action: Action, data: Dict[str, any]):
-            op.RS_LOG.Debug(f"[OPTarget]: Handling bulk set action for {self.id}")
-            op.RS_LOG.Debug("Data received:", data)
-
             for par in self.parGroupTargets.values():
                 if par.parShape is None:
                     continue
 
-                if par.parGroup.name in data:
-                    value = data.get(par.parGroup.name, None)
-                    if value is None:
-                        op.RS_LOG.Debug(f"Skipping {par.parGroup.name} on {self.page.name} as no value provided")
-                        continue
-                    par.parShape.setData(value)
-                op.RS_LOG.Debug(f"Setting {par.parGroup.name} to {value} on {self.page.name}")
+                value = data.get(par.parGroup.name, None)
+                if value is None:
+                    continue
+                par.parShape.setData(value)
+
             for sequenceTarget in self.sequenceTargets.values():
                 value = data.get(sequenceTarget.sequence.name, None)
                 if value is None:
                     continue
                 sequenceTarget.parShape.setData(value)
-                op.RS_LOG.Debug(f"Setting sequence {sequenceTarget.sequence.name} on {self.page.name}")
+
             opCompletePulse = self.ownerComp.par[self.bulkUpdatedName]
             if not opCompletePulse.isPulse:
                 op.RS_LOG.Warning(f"[PageTarget]: {self.bulkUpdatedName} is not a pulse parameter, cannot pulse.")
                 return
             opCompletePulse.pulse()
-            pass
 
 
         orderedEntries = self.buildBulkSchemaEntries()

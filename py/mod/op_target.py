@@ -139,33 +139,27 @@ class OPTarget(TouchTarget):
     def getActions(self):
 
         def bulk_set_action_handler(action: Action, data: Dict[str, any]):
-            op.RS_LOG.Debug(f"[OPTarget]: Handling bulk set action for {self.id}")
-            op.RS_LOG.Debug("Data received:", data)
-
             for page in self.pageTargets.values():
                 for par in page.parGroupTargets.values():
                     if par.parShape is None:
                         continue
 
-                    if par.parGroup.name in data:
-                        value = data.get(par.parGroup.name, None)
-                        if value is None:
-                            op.RS_LOG.Debug(f"Skipping {par.parGroup.name} on {page.name} as no value provided")
-                            continue
-                        par.parShape.setData(value)
-                    op.RS_LOG.Debug(f"Setting {par.parGroup.name} to {value} on {page.page.name}")
+                    value = data.get(par.parGroup.name, None)
+                    if value is None:
+                        continue
+                    par.parShape.setData(value)
+
                 for sequenceTarget in page.sequenceTargets.values():
                     value = data.get(sequenceTarget.sequence.name, None)
                     if value is None:
                         continue
                     sequenceTarget.parShape.setData(value)
-                    op.RS_LOG.Debug(f"Setting sequence {sequenceTarget.sequence.name} on {page.page.name}")
+
             opCompletePulse = self.ownerComp.par[RS_BUNDLE_COMPLETE_PAR]
             if not opCompletePulse.isPulse:
                 op.RS_LOG.Debug(f"[OPTarget]: {RS_BUNDLE_COMPLETE_PAR} is not a pulse parameter, cannot pulse.")
                 return
             opCompletePulse.pulse()
-            pass
 
 
         orderedEntries = []

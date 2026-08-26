@@ -512,13 +512,14 @@ class ExecClient:
 			self.log('No tx in query response data')
 			return
 
-		handler = self.queryHandlers.get(tx, None)
+		handler = self.queryHandlers.pop(tx, None)
 		if not handler:
 			return
 		handler(QueryResponse(data))
 
 	def parseQueryError(self, data):
 		error = QueryError(data)
+		self.queryHandlers.pop(error.tx, None)
 		self.log(f"Query error [{error.queryId}] tx={error.tx}: {error.message}")
 
 	def parseReportResponse(self, data):
@@ -526,13 +527,14 @@ class ExecClient:
 		if not tx:
 			self.log('No tx in report response data')
 			return
-		handler = self.reportHandlers.get(tx, None)
+		handler = self.reportHandlers.pop(tx, None)
 		if not handler:
 			return
 		handler(ReportResponse(data))
 
 	def parseReportError(self, data):
 		error = ReportError(data)
+		self.reportHandlers.pop(error.tx, None)
 		self.log(f"Report error [{error.reportId}] tx={error.tx}: {error.message}")
 
 	def handleExecTargetAction(self, command: ExecTargetAction):
