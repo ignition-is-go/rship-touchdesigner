@@ -21,7 +21,17 @@ class SequenceTarget(TouchTarget):
 
     @property
     def id(self) -> str:
-        return f"{self.opTargetId}:{self.sequence.name}"
+        legacyId = f"{self.opTargetId}:{self.sequence.name}"
+
+        # Sequence targets historically omitted their owning page from the ID.
+        # Preserve that ID unless it would be identical to the PageTarget ID
+        # (for example, a "Sampler" sequence on a "Sampler" page).  Identical
+        # IDs make one target and its actions silently overwrite the other in
+        # Rship's ID-indexed registries.
+        if legacyId == self.parentId:
+            return f"{self.opTargetId}:Sequence:{self.sequence.name}"
+
+        return legacyId
 
     def collectChildren(self):
         return [self]

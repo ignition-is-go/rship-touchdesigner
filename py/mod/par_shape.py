@@ -1,7 +1,19 @@
 from abc import ABC, abstractmethod
+from copy import deepcopy
 from typing import Dict, List
 
 from td import OP, ParGroup
+
+
+SEQUENCE_VALUE_ENVELOPE_STYLES = frozenset({
+    "Str",
+    "Toggle",
+    "Pulse",
+    "Momentary",
+    "Menu",
+    "StrMenu",
+    "File",
+})
 
 
 class ParShape(ABC):
@@ -531,6 +543,59 @@ class SequenceParShape(ParShape):
         self.parGroup = parGroup
         self.ownerComp = ownerComp
         self.sequenceParGroups = sequenceParGroups or [parGroup]
+        self._cachedData = None
+        self._blockCacheSequenceName = None
+        self._blockCacheCount = -1
+        self._blockMembers = []
+        self._blockPulseMemberKeys = []
+
+    def _invalidateBlockCache(self):
+        self._blockCacheSequenceName = None
+        self._blockCacheCount = -1
+        self._blockMembers = []
+        self._blockPulseMemberKeys = []
+
+    def _ensureBlockCache(self, sequence):
+        blockCount = sequence.numBlocks
+        if (
+            self._blockCacheSequenceName == sequence.name
+            and self._blockCacheCount == blockCount
+            and len(self._blockMembers) == blockCount
+        ):
+            return
+
+        blockMembers = []
+        blockPulseMemberKeys = []
+
+        # Iterating a TouchDesigner SequenceBlock creates ParGroup/PageList
+        # proxy objects.  Materialize those proxies once per sequence shape and
+        # reuse them until the number of blocks changes.
+        for block in sequence.blocks:
+            members = []
+            pulseMemberKeys = []
+            for blockParGroup in block:
+                try:
+                    blockShape = buildShape(self.ownerComp, blockParGroup)
+                except ValueError as e:
+                    op.RS_LOG.Debug(
+                        f"[SequenceParShape]: Skipping par '{blockParGroup.name}' while caching sequence members: {e}"
+                    )
+                    continue
+
+                memberKey = self._getSequenceMemberKey(blockParGroup)
+                members.append((blockParGroup, memberKey, blockShape))
+                if blockParGroup.style in ("Pulse", "Momentary"):
+                    pulseMemberKeys.append(memberKey)
+
+            blockMembers.append(tuple(members))
+            blockPulseMemberKeys.append(tuple(pulseMemberKeys))
+
+        # TD may return a fresh Python proxy each time ParGroup.sequence is
+        # accessed, so object identity is not a stable cache key.
+        self._blockCacheSequenceName = sequence.name
+        self._blockCacheCount = blockCount
+        self._blockMembers = tuple(blockMembers)
+        self._blockPulseMemberKeys = tuple(blockPulseMemberKeys)
 
     def _getSchemaParGroups(self) -> List[ParGroup]:
         schemaParGroups = []
@@ -548,18 +613,13 @@ class SequenceParShape(ParShape):
             return schemaParGroups
 
         sequence = self.parGroup.sequence
-        if sequence is None or len(sequence.blocks) == 0:
+        if sequence is None or sequence.numBlocks == 0:
             return []
 
-        fallbackParGroups = []
-        for blockParGroup in sequence.blocks[0]:
-            if blockParGroup is None:
-                continue
-            if blockParGroup.style == "Sequence":
-                continue
-            fallbackParGroups.append(blockParGroup)
-
-        return fallbackParGroups
+        self._ensureBlockCache(sequence)
+        if not self._blockMembers:
+            return []
+        return [member[0] for member in self._blockMembers[0]]
 
     def _getSequenceMemberKey(self, parGroup: ParGroup) -> str:
         sequence = getattr(parGroup, 'sequence', None)
@@ -587,9 +647,16 @@ class SequenceParShape(ParShape):
         return value
 
     def _wrapSequenceMemberData(self, parGroup: ParGroup, value: any):
-        shape = buildShape(self.ownerComp, parGroup)
-        schemaProperties = shape.buildSchemaProperties()
-        if list(schemaProperties.keys()) == ["value"] and not isinstance(value, dict):
+        # Scalar sequence members use the same {"value": ...} envelope as their
+        # non-sequence ParShape counterparts.  Determine that from the parameter
+        # shape instead of building its schema here.  Menu schema construction
+        # reads menuNames/menuLabels, which can re-evaluate a dynamic menuSource
+        # while TouchDesigner is resizing or populating the sequence.
+        usesValueEnvelope = (
+            parGroup.style in SEQUENCE_VALUE_ENVELOPE_STYLES
+            or (parGroup.style in ("Float", "Int") and parGroup.size == 1)
+        )
+        if usesValueEnvelope and not isinstance(value, dict):
             return {"value": value}
         return value
 
@@ -601,21 +668,33 @@ class SequenceParShape(ParShape):
             "properties": schemaProperties,
         }
 
+    def _blockHasActivePulse(self, blockIndex: int, blockData: Dict[str, any]) -> bool:
+        if blockIndex >= len(self._blockPulseMemberKeys):
+            return False
+        return any(
+            bool(blockData.get(memberKey, False))
+            for memberKey in self._blockPulseMemberKeys[blockIndex]
+        )
+
     def buildData(self) -> List[Dict[str, any]]:
         items = []
         sequence = self.parGroup.sequence
         if sequence is None:
             return items
 
-        for block in sequence.blocks:
+        self._ensureBlockCache(sequence)
+        for blockMembers in self._blockMembers:
             blockItem = {}
-            for blockParGroup in block:
-                blockShape = buildShape(self.ownerComp, blockParGroup)
-                blockItem[self._getSequenceMemberKey(blockParGroup)] = self._unwrapSequenceMemberData(
+            for blockParGroup, memberKey, blockShape in blockMembers:
+                blockItem[memberKey] = self._unwrapSequenceMemberData(
                     blockShape.buildData()
                 )
             items.append(blockItem)
 
+        # SequenceTarget keeps one SequenceParShape alive for actions and
+        # emitters.  Retain the most recently observed state so a high-rate set
+        # does not have to re-evaluate every member merely to find its delta.
+        self._cachedData = deepcopy(items)
         return items
 
     def buildSchemaProperties(self) -> Dict[str, any]:
@@ -627,7 +706,11 @@ class SequenceParShape(ParShape):
             if memberKey in seenParGroups:
                 continue
             seenParGroups.add(memberKey)
-            blockShape = buildShape(self.ownerComp, blockParGroup)
+            try:
+                blockShape = buildShape(self.ownerComp, blockParGroup)
+            except ValueError as e:
+                op.RS_LOG.Debug(f"[SequenceParShape]: Skipping par '{blockParGroup.name}' in buildSchemaProperties: {e}")
+                continue
             itemProperties[memberKey] = self._unwrapSequenceMemberSchema(
                 blockShape.buildSchemaProperties()
             )
@@ -648,16 +731,41 @@ class SequenceParShape(ParShape):
         if not isinstance(data, list):
             raise ValueError("Sequence data must be an array")
 
-        sequence.numBlocks = len(data)
-
+        # Validate the complete payload before resizing or assigning anything.
         for blockIndex, blockData in enumerate(data):
             if not isinstance(blockData, dict):
                 raise ValueError(f"Sequence block {blockIndex} must be an object")
 
-            block = sequence.blocks[blockIndex]
-            for blockParGroup in block:
-                blockValue = blockData.get(self._getSequenceMemberKey(blockParGroup), None)
+        # Assigning numBlocks rebuilds TouchDesigner's sequential parameters.
+        # Avoid that churn when an action only updates values in existing blocks.
+        if sequence.numBlocks != len(data):
+            sequence.numBlocks = len(data)
+            self._invalidateBlockCache()
+        self._ensureBlockCache(sequence)
+
+        for blockIndex, blockData in enumerate(data):
+            blockMembers = self._blockMembers[blockIndex]
+            for blockParGroup, memberKey, blockShape in blockMembers:
+                blockValue = blockData.get(memberKey, None)
                 if blockValue is None:
                     continue
-                blockShape = buildShape(self.ownerComp, blockParGroup)
+                isActivePulse = (
+                    blockParGroup.style in ("Pulse", "Momentary")
+                    and bool(blockValue)
+                )
+                if blockParGroup.style in ("Pulse", "Momentary") and not blockValue:
+                    continue
+                if not isActivePulse:
+                    # Parameters can be changed by TouchDesigner scene recalls,
+                    # expressions, exports, or scripts without going through
+                    # this action handler.  The last received payload is not a
+                    # reliable snapshot of the live component, so compare the
+                    # desired value with the actual parameter before skipping.
+                    currentValue = self._unwrapSequenceMemberData(
+                        blockShape.buildData()
+                    )
+                    if currentValue == blockValue:
+                        continue
                 blockShape.setData(self._wrapSequenceMemberData(blockParGroup, blockValue))
+
+        self._cachedData = deepcopy(data)
