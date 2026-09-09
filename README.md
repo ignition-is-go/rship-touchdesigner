@@ -54,3 +54,38 @@ Notch TOPs also have first-class support. Similar to Base COMPs, their parameter
     - Publish layer par values
   - Actions:
     - Set layer par values
+
+
+## Legacy properties and loading
+
+The Python source pairs supported ordinary parameter Set actions with their existing Updated emitters using legacy `Action.writesTo` metadata. It does not use the server Views schema. Parameter target IDs, Set and Resend action IDs, and Bulk Set payloads remain compatible with existing scenes.
+
+A property setter publishes the parameter's actual value after assignment, including unchanged or normalized values. The executor also supplies current values on registration, reconnect, and server `ResendEmitterValue` requests. Menu values use `menuNames`; labels only control display. Scalar values keep the existing `{"value": ...}` shape, and vectors retain their component objects.
+
+For chain scenes, select and elect the desired properties in Rship. The executor does not convert existing scenes or elect property nodes automatically.
+
+Sequences expose a writable `<sequence name> State` property containing an array of blocks. The array length sets the block count within TouchDesigner's limits, with at least one block. Empty arrays and arrays above a sequence's maximum are rejected before assignment. Each block contains its persistent parameter values. Pulse and Momentary members are omitted from the property schema, readback, and assignment, so reconciliation cannot replay Emit or Clear events. The existing sequence Set, Resend, and Bulk Set actions retain their payloads and event behavior.
+
+Ordinary controls on sequence-based operators also support properties. Add the `rship-no-properties` tag to an operator to disable writable pairing explicitly. Existing emitters remain registered, so the legacy server may still display them as read-only properties.
+
+The executor publishes Starting before scanning and registering targets. It publishes definitions and current value seeds before target Online statuses and instance Available. Early action and Resend requests wait in arrival order while registration finishes. Failed scans or sends retry through the existing timer with delays capped at 30 seconds. Disconnect clears deferred commands and pending outbound pulses.
+
+The loading queue accepts at most 1,024 command envelopes and 16 MiB of text. Overflow returns a command error. Queue draining yields after 16 envelopes or 4 milliseconds and resumes on the next frame. A single batch envelope executes as a whole, so an unusually large batch can exceed that frame budget.
+
+The bundled `rship.tox` includes these changes. The development `RshipTox.toe` references that TOX. Automated behavior tests use simulated TouchDesigner parameters and real protocol serialization:
+
+```sh
+python -m unittest discover -s tests -v
+```
+
+Rebuild the package with the installed TouchDesigner utilities:
+
+```powershell
+python tools/build_tox.py --td-bin "C:/Program Files/Derivative/TouchDesigner.2025.33070/bin" --output rship.tox
+```
+
+Omit `--output` to check the existing package. The builder embeds UTF-8 source with LF newlines, re-expands the output, and verifies every embedded Python DAT against source. It also checks the table of contents and confirms that all other package data remains unchanged.
+
+Validation on 2026-09-09 passed all 53 automated tests. Isolated TouchDesigner 2025.33070 checks covered loading, ordinary properties, and 17 sequence checks, including embedded-code reload, block resizing, minimum-block rejection, event filtering, current readback, and emitter fanout. Network output was captured locally. The installed production component registered 31 sequence properties and returned to Active without operator errors.
+
+Production server scene reconciliation still requires an end-to-end check after installation. The protocol reference is the [pre-Views property implementation](https://github.com/ignition-is-go/rship/blob/2888e94b3ac801a83829ff9f0215d8208c792994/libs/entities/external/src/property.rs).

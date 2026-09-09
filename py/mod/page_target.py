@@ -1,5 +1,5 @@
 from datetime import datetime, timezone
-from par_group_target import ParGroupTarget
+from par_group_target import ParGroupTarget, supportsProperties
 from sequence_target import SequenceTarget
 from exec import Target, TargetStatus, Action, Emitter, Instance
 from typing import Dict, List
@@ -112,6 +112,7 @@ class PageTarget(TouchTarget):
         return allEmitters
     
     def buildParGroupTargets(self):
+        allowProperties = supportsProperties(self.ownerComp)
         seenSequences = set()
         for par in self.page.parGroups:
             try:
@@ -136,7 +137,7 @@ class PageTarget(TouchTarget):
                     self.sequenceTargetsByName[t.sequence.name] = t
                     seenSequences.add(sequenceName)
                     continue
-                t = ParGroupTarget(self.id, self.parentId, self.ownerComp, par, self.instance)
+                t = ParGroupTarget(self.id, self.parentId, self.ownerComp, par, self.instance, allowProperties=allowProperties)
                 self.parGroupTargets[t.id] = t
                 self.parGroupTargetsByName[par.name] = t
             except Exception as e:

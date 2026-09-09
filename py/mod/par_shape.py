@@ -539,10 +539,11 @@ def buildShape(ownerComp: OP, parGroup: ParGroup) -> ParShape:
 
 
 class SequenceParShape(ParShape):
-    def __init__(self, ownerComp: OP, parGroup: ParGroup, sequenceParGroups: List[ParGroup] | None = None):
+    def __init__(self, ownerComp: OP, parGroup: ParGroup, sequenceParGroups: List[ParGroup] | None = None, stateOnly: bool = False):
         self.parGroup = parGroup
         self.ownerComp = ownerComp
         self.sequenceParGroups = sequenceParGroups or [parGroup]
+        self.stateOnly = stateOnly
         self._cachedData = None
         self._blockCacheSequenceName = None
         self._blockCacheCount = -1
@@ -574,6 +575,8 @@ class SequenceParShape(ParShape):
             members = []
             pulseMemberKeys = []
             for blockParGroup in block:
+                if self.stateOnly and blockParGroup.style in ("Pulse", "Momentary"):
+                    continue
                 try:
                     blockShape = buildShape(self.ownerComp, blockParGroup)
                 except ValueError as e:
@@ -604,8 +607,6 @@ class SequenceParShape(ParShape):
             if parGroup is None:
                 continue
             if parGroup.style == "Sequence":
-                continue
-            if parGroup.name == self.parGroup.name:
                 continue
             schemaParGroups.append(parGroup)
 
@@ -702,6 +703,8 @@ class SequenceParShape(ParShape):
         seenParGroups = set()
 
         for blockParGroup in self._getSchemaParGroups():
+            if self.stateOnly and blockParGroup.style in ("Pulse", "Momentary"):
+                continue
             memberKey = self._getSequenceMemberKey(blockParGroup)
             if memberKey in seenParGroups:
                 continue
@@ -715,13 +718,19 @@ class SequenceParShape(ParShape):
                 blockShape.buildSchemaProperties()
             )
 
-        return {
+        schema = {
             "type": "array",
             "items": {
                 "type": "object",
                 "properties": itemProperties,
             },
         }
+        if self.stateOnly:
+            schema["minItems"] = 1
+            maximum = getattr(self.parGroup.sequence, "maxBlocks", None)
+            if maximum is not None:
+                schema["maxItems"] = maximum
+        return schema
 
     def setData(self, data: List[Dict[str, any]]):
         sequence = self.parGroup.sequence
@@ -730,6 +739,11 @@ class SequenceParShape(ParShape):
 
         if not isinstance(data, list):
             raise ValueError("Sequence data must be an array")
+
+        if self.stateOnly:
+            maximum = getattr(sequence, "maxBlocks", None)
+            if len(data) < 1 or (maximum is not None and len(data) > maximum):
+                raise ValueError("Sequence state block count is outside TouchDesigner's supported range")
 
         # Validate the complete payload before resizing or assigning anything.
         for blockIndex, blockData in enumerate(data):

@@ -1,3 +1,4 @@
+from copy import deepcopy
 from datetime import datetime, timezone
 from enum import Enum
 from typing import List
@@ -31,7 +32,7 @@ class MEvent:
 		options: dict | None = None,
 	):
 		self.changeType = changeType.value
-		self.item = item if isinstance(item, dict) else item.__dict__
+		self.item = deepcopy(item if isinstance(item, dict) else item.__dict__)
 		self.itemType = itemType or type(item).__name__
 		self.createdAt = createdAt or iso_now()
 		self.tx = tx or str(uuid4())

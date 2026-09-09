@@ -1,4 +1,5 @@
 import importlib.util
+import builtins
 from pathlib import Path
 import sys
 import types
@@ -28,13 +29,13 @@ td_functions = types.ModuleType("TDFunctions")
 td_functions.createProperty = lambda *args, **kwargs: None
 sys.modules.setdefault("TDFunctions", td_functions)
 
-op_target = types.ModuleType("op_target")
-op_target.OPTarget = type("OPTarget", (), {})
-sys.modules.setdefault("op_target", op_target)
-
-target = types.ModuleType("target")
-target.TouchTarget = type("TouchTarget", (), {})
-sys.modules.setdefault("target", target)
+td_stub = types.ModuleType("td")
+td_stub.OP = type("OP", (), {})
+td_stub.ParGroup = type("ParGroup", (), {})
+sys.modules.setdefault("td", td_stub)
+builtins.OP = td_stub.OP
+builtins.ParGroup = td_stub.ParGroup
+builtins.Page = type("Page", (), {})
 
 RSHIP = load_module("rship_ext_under_test", ROOT / "py" / "RshipExt.py")
 
@@ -57,6 +58,7 @@ class FakeClient:
     def __init__(self):
         self.actions = {}
         self.handlers = {}
+        self.emitterValueProviders = {}
         self.batches = []
 
     def setSend(self, send):
@@ -141,6 +143,8 @@ class RshipExtRetentionTests(unittest.TestCase):
         extension._pendingExplicitPulses = []
         extension._pulseFlushScheduled = False
         extension.wsConnected = True
+        extension.state = RSHIP.RshipState.ACTIVE
+        extension._connectionGeneration = 1
         extension.updateStatsPage = lambda **kwargs: None
         return extension
 
@@ -209,9 +213,9 @@ class RshipExtRetentionTests(unittest.TestCase):
 
         extension.sendProjectData()
 
-        batch = self.client.batches[0]
+        batch = [event for events in self.client.batches for event in events]
         status_indexes = [index for index, event in enumerate(batch) if hasattr(event, "status")]
-        definition_indexes = [index for index, event in enumerate(batch) if hasattr(event, "item")]
+        definition_indexes = [index for index, event in enumerate(batch) if hasattr(event, "item") and isinstance(event.item, (EXEC.Target, EXEC.Action, EXEC.Emitter))]
         self.assertTrue(status_indexes)
         self.assertLess(max(definition_indexes), min(status_indexes))
 
@@ -221,7 +225,7 @@ class RshipExtRetentionTests(unittest.TestCase):
         RSHIP.run = lambda *args, **kwargs: scheduled.append((args, kwargs))
         owner = types.SimpleNamespace(path="/generator")
         emitter = types.SimpleNamespace(id="generator-updated")
-        extension.emitterIndex["/generator.Generator"] = emitter
+        extension.emitterIndex["/generator.Generator"] = [emitter]
 
         value = {"count": 0}
 
@@ -229,7 +233,7 @@ class RshipExtRetentionTests(unittest.TestCase):
             value["count"] += 1
             return {"count": value["count"]}
 
-        extension.emitterHandlers["/generator.Generator"] = handler
+        extension.emitterHandlers[emitter.id] = handler
 
         extension.PulseEmitter(owner, "Generator")
         extension.PulseEmitter(owner, "Generator")
