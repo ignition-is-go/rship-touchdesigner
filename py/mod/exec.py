@@ -55,6 +55,10 @@ class TargetStatus(MItem):
 		self.instanceId = instanceId
 
 
+def makeWriterRef(emitterId: str, role: str = "canonical") -> dict:
+	return {"emitterId": emitterId, "role": role}
+
+
 class Action(MItem):
 	def __init__(
 		self,
@@ -65,6 +69,7 @@ class Action(MItem):
 		schema: any,
 		handler: Callable[[Self, Dict[str, any]], None],
 		schemaLayout: any = None,
+		writesTo: dict | None = None,
 	):
 		super().__init__(id, name)
 		self.schema = schema
@@ -72,6 +77,8 @@ class Action(MItem):
 		self.targetId = targetId
 		self.serviceId = serviceId
 		self.handler = handler
+		if writesTo is not None:
+			self.writesTo = writesTo
 
 
 class Emitter(MItem):
@@ -294,6 +301,8 @@ class ExecClient:
 		self.webRtcConnections: Dict[str, str] = {}
 		self.queryHandlers: Dict[str, callable] = {}
 		self.reportHandlers: Dict[str, callable] = {}
+		self.instanceId: str | None = None
+		self.emitterValueProviders: Dict[str, Callable] = {}
 
 	def setSend(self, send):
 		self.send = send
@@ -305,8 +314,7 @@ class ExecClient:
 	def _sendPayload(self, payload: dict):
 		send = getattr(self, 'send', None) or ExecClient._shared_send
 		if send is None:
-			self.log('Cant send, no socket')
-			return
+			raise RuntimeError('Cannot send without a socket')
 		send(json.dumps(payload))
 
 	def buildSetEvent(self, item: MItem | dict, itemType: str | None = None) -> MEvent:
@@ -333,7 +341,10 @@ class ExecClient:
 			data = d.get('data', None)
 
 			if event == 'ws:m:command':
-				self.parseCommand(data)
+				try:
+					self.parseCommand(data)
+				except Exception as error:
+					self.sendCommandError(data.get('command', {}).get('tx', ''), data.get('commandId', ''), str(error))
 			elif event == 'ws:m:query-response':
 				self.parseQueryResponse(data)
 			elif event == 'ws:m:query-error':
@@ -411,6 +422,8 @@ class ExecClient:
 				self.handleIncomingExecTargetAction('ExecTargetAction', wrapped_action_command)
 		elif commandId == 'CompactBatchTargetAction':
 			self.handleCompactBatchTargetAction(commandId, command)
+		elif commandId == 'ResendEmitterValue':
+			self.handleResendEmitterValue(command)
 		else:
 			self.log(f'Unhandled commandId: {commandId}')
 
@@ -438,26 +451,29 @@ class ExecClient:
 					errors.append(f'Compact batch assignment missing targetId or payloadIndex for action {action_id}')
 					continue
 
-				if payload_index < 0 or payload_index >= len(payloads):
+				if not isinstance(payload_index, int) or isinstance(payload_index, bool) or payload_index < 0 or payload_index >= len(payloads):
 					errors.append(
 						f'Compact batch payload missing for action {action_id} at index {payload_index}'
 					)
 					continue
 
-				self.handleIncomingExecTargetAction(
-					'ExecTargetAction',
-					{
-						'tx': tx,
-						'createdAt': created_at,
-						'instanceId': instance_id,
-						'action': {
-							'id': action_id,
-							'targetId': target_id,
+				try:
+					self.handleIncomingExecTargetAction(
+						'ExecTargetAction',
+						{
+							'tx': tx,
+							'createdAt': created_at,
+							'instanceId': instance_id,
+							'action': {
+								'id': action_id,
+								'targetId': target_id,
+							},
+							'data': payloads[payload_index],
 						},
-						'data': payloads[payload_index],
-					},
-					respond=False,
-				)
+						respond=False,
+					)
+				except Exception as error:
+					errors.append(str(error))
 
 		if errors:
 			self.sendCommandError(tx, commandId, '; '.join(errors))
@@ -496,6 +512,10 @@ class ExecClient:
 			data=command.get('data', None),
 		)
 		try:
+			if self.instanceId is not None and instance_id not in (None, self.instanceId):
+				raise ValueError('Command belongs to another instance')
+			if target_id != action.targetId:
+				raise ValueError('Command target does not match its action')
 			response = self.handleExecTargetAction(c)
 			if respond:
 				self.sendCommandResponse(tx, response=response)
@@ -506,19 +526,35 @@ class ExecClient:
 			else:
 				raise
 
+	def handleResendEmitterValue(self, command: dict):
+		tx = command.get('tx', '')
+		try:
+			if self.instanceId is None or command.get('instanceId') != self.instanceId:
+				raise ValueError('Resend belongs to another instance')
+			emitterId = command.get('emitterId')
+			provider = self.emitterValueProviders.get(emitterId)
+			if provider is None:
+				raise ValueError('No property value provider for emitter: ' + str(emitterId))
+			self.pulseEmitter(emitterId, provider())
+			self.sendCommandResponse(tx)
+		except Exception as error:
+			self.sendCommandError(tx, 'ResendEmitterValue', str(error))
+
+
 	def parseQueryResponse(self, data):
 		tx = data.get('tx', None)
 		if not tx:
 			self.log('No tx in query response data')
 			return
 
-		handler = self.queryHandlers.get(tx, None)
+		handler = self.queryHandlers.pop(tx, None)
 		if not handler:
 			return
 		handler(QueryResponse(data))
 
 	def parseQueryError(self, data):
 		error = QueryError(data)
+		self.queryHandlers.pop(error.tx, None)
 		self.log(f"Query error [{error.queryId}] tx={error.tx}: {error.message}")
 
 	def parseReportResponse(self, data):
@@ -526,13 +562,14 @@ class ExecClient:
 		if not tx:
 			self.log('No tx in report response data')
 			return
-		handler = self.reportHandlers.get(tx, None)
+		handler = self.reportHandlers.pop(tx, None)
 		if not handler:
 			return
 		handler(ReportResponse(data))
 
 	def parseReportError(self, data):
 		error = ReportError(data)
+		self.reportHandlers.pop(error.tx, None)
 		self.log(f"Report error [{error.reportId}] tx={error.tx}: {error.message}")
 
 	def handleExecTargetAction(self, command: ExecTargetAction):

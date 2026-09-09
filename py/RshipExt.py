@@ -8,12 +8,14 @@ can be accessed externally, e.g. op('yourComp').PromotedFunction().
 Help: search "Extensions" in wiki
 """
 import datetime
+import time
+from collections import deque
 from typing import Dict, Set, Callable
 from enum import Enum
 
 import TDFunctions as TDF
 import socket
-from exec import CLIENT, ExecClient, GetActionsByQuery, GetEmittersByQuery, GetTargetsByQuery, Instance, Machine, InstanceStatus, Status, Action, Emitter
+from exec import CLIENT, ExecClient, GetActionsByQuery, GetEmittersByQuery, GetTargetsByQuery, Instance, Machine, InstanceStatus, Status, Action, Emitter, Pulse
 from myko import QueryResponse
 from op_target import OPTarget
 import json
@@ -29,6 +31,7 @@ class RshipState(Enum):
 	DISCONNECTED = "disconnected"  # Configured locally, but websocket is not connected
 	CONNECTED = "connected"  # WebSocket connected
 	SYNCING = "syncing"  # Currently syncing data to server
+	ACTIVE = "active"
 
 # endregion State Management
 
@@ -38,7 +41,7 @@ class ExecInfo:
 	connected: bool
 	rshipUrl: str | None
 	machineId: str
-	
+
 
 	def __init__(self, machineId: str, connected: bool, rshipUrl: str | None):
 		self.machineId = machineId
@@ -51,6 +54,14 @@ class ExecInfo:
 
 class RshipExt:
 	STATS_PAGE = 'Rship Sync Stats'
+	DEFERRED_COMMANDS = frozenset(('ExecTargetAction', 'BatchTargetAction', 'CompactBatchTargetAction', 'ResendEmitterValue'))
+	MAX_DEFERRED_COMMANDS = 1024
+	MAX_DEFERRED_BYTES = 16 * 1024 * 1024
+	DRAIN_RUN_SOURCE = "args[0]._drainCommands()"
+	DRAIN_COMMAND_LIMIT = 16
+	DRAIN_TIME_SECONDS = 0.004
+	TICK_RUN_SOURCE = "args[0].OnTickInterval()"
+	PULSE_FLUSH_RUN_SOURCE = "args[0]._flushPulses()"
 	LOCAL_TARGETS_PAR = 'Localtargets'
 	LOCAL_ACTIONS_PAR = 'Localactions'
 	LOCAL_EMITTERS_PAR = 'Localemitters'
@@ -61,14 +72,14 @@ class RshipExt:
 	def __init__(self, ownerComp):
 		self.ownerComp = ownerComp
 		self.findTargetsOp = self.ownerComp.op('find_targets')
-		
+
 		self.websocketOp = self.ownerComp.op('websocket')
 		self.execInfoOp = self.ownerComp.op('exec_info')
 
 		self.targetsOp = self.ownerComp.op('path_and_pars')
 
 		self.streamSourcesOp = self.ownerComp.op('stream_sources')
-		
+
 		CLIENT.setSend(self.websocketOp.sendText)
 
 		TDF.createProperty(self, 'MachineId', value=None, dependable=True,
@@ -76,13 +87,13 @@ class RshipExt:
 
 		TDF.createProperty(self, "wsConnected", value=False, dependable=True, readOnly=False)
 		TDF.createProperty(self, "ConnectionStatus", value="uninitialized", dependable=True, readOnly=False)
-		
+
 		# State management
 		self.state = RshipState.UNINITIALIZED
 		self._machineId: str | None = None
 		self._rshipUrl: str | None = None
 		self._rshipPort: int = 5155
-		
+
 		self.execInfoRequests = {}
 
 		self.opTargets: Dict[str, OPTarget] = {}
@@ -90,12 +101,23 @@ class RshipExt:
 
 		self.instance: Instance | None = None
 
-		self.emitterIndex: Dict[str, Emitter] = {}
+		self.emitterIndex: Dict[str, list[Emitter]] = {}
 		self.emitterHandlers: Dict[str, Callable] = {}
 
-		self.reconnectTimerOp = self.ownerComp.op('reconnect_timer')
+		self._pendingPulses = {}
+		self._pendingExplicitPulses = []
+		self._pulseFlushScheduled = False
+		self._deferredCommands = deque()
+		self._deferredBytes = 0
+		self._drainRun = None
+		self._connectionGeneration = 0
+		self._retryAt = 0.0
+		self._retryDelay = 1.0
 
-		self.reconnectTimerOp.par.start.pulse()
+		self._tickInterval = 1.0  # seconds
+		self._tickRun = None
+		self._cancelScheduledRuns()
+		self._scheduleTick()
 
 		self.remoteKeys: Set[str] = set()
 		self.sentTargetStatuses: Dict[str, Status] = {}  # Track which statuses we've sent
@@ -109,7 +131,7 @@ class RshipExt:
 		self.ensureStatsPars()
 		self.updateStatsPage(localTargets=0, localActions=0, localEmitters=0)
 
-	
+
 	def postInit(self):
 		CLIENT.setSend(self.websocketOp.sendText)
 		self.websocketOp.par.reset.pulse()
@@ -180,49 +202,50 @@ class RshipExt:
 				self.ConnectionStatus = newState.value
 
 	def _ensureReady(self) -> bool:
-		"""Ensure we have minimum requirements to operate. Returns True if ready."""
 		if self._machineId is None:
 			return False
-		
-		if self.state == RshipState.UNINITIALIZED:
-			self._transitionState(RshipState.READY)
+		expectedId = self._machineId + ":" + self.makeServiceId()
+		if self.instance is None or self.instance.id != expectedId:
 			self._createInstance()
-		
+		if self.state == RshipState.UNINITIALIZED:
+			self._transitionState(RshipState.CONNECTED if self.wsConnected else RshipState.READY)
 		return True
 
 	def _createInstance(self):
 		"""Create the local instance object"""
 		if self._machineId is None:
 			return
-		
+
 		serviceId = self.makeServiceId()
-		
+
 		self.instance = Instance(
 			id=self._machineId + ":" + serviceId,
 			name=serviceId,
 			serviceId=serviceId,
 			serviceTypeCode="touchdesigner",
-			status=InstanceStatus.Available,
+			status=InstanceStatus.Starting,
 			machineId=self._machineId,
 			color="#727e51"
 		)
-		
+
 		# Keep MachineId property in sync for backwards compatibility
 		self.MachineId = self._machineId
-		
+		CLIENT.instanceId = self.instance.id
+		self.sentTargetStatuses.clear()
+
 		op.RS_LOG.Debug(f"[RshipExt]: Instance created: {self.instance.id}")
 
 	def OnProjectPreSave(self):
 		# Always rescan and update local cache
 		self.cookTargetList()
 		self.updateExecInfo()
-		
+
 		# Only send to server if we're ready
 		if self._ensureReady():
 			self.refreshProjectData()
 
 
-# region exec info 
+# region exec info
 	def updateExecInfo(self):
 		#op.RS_LOG.Debug("[RshipExt]: Updating Exec Info from Rship Link...")
 		self.execInfoOp.par.request.pulse()
@@ -259,10 +282,10 @@ class RshipExt:
 
 			# Update configuration
 			configChanged = self._updateConfiguration(machineId, rshipUrl)
-			
+
 			if configChanged and self._ensureReady():
 				self.refreshProjectData()
-				
+
 		except Exception as e:
 			op.RS_LOG.Warning("[RshipExt]: Error occurred while processing Exec Info:", e)
 			self._updateConfiguration(None, None)
@@ -277,21 +300,21 @@ class RshipExt:
 		Returns True if anything changed.
 		"""
 		changed = False
-		
+
 		# Update machine ID
 		if machineId is None or machineId == "":
 			hostname = socket.gethostname()
 			if self._machineId != hostname:
 				op.RS_LOG.Warning("[RshipExt]: Machine Id not provided, using fallback", hostname)
 			machineId = hostname
-		
+
 		if self._machineId != machineId:
 			self._machineId = machineId
 			changed = True
 			# Recreate instance with new machine ID
 			if self.state != RshipState.UNINITIALIZED:
 				self._createInstance()
-		
+
 		# Update Rship URL. If exec info is unavailable, preserve any manually configured address.
 		if rshipUrl is None or rshipUrl == "":
 			manualAddress = self.ownerComp.par.Address.eval()
@@ -321,20 +344,20 @@ class RshipExt:
 					port = defaultPort
 
 			rshipUrl = f"{protocol}://{host}" if protocol else host
-			
+
 			if self._rshipUrl != rshipUrl or self._rshipPort != port:
 				self._rshipUrl = rshipUrl
 				self._rshipPort = port
-				
+
 				# Don't reconnect if already connected to this address
-				if not (self.wsConnected and 
-						self.ownerComp.par.Port.eval() == port and 
+				if not (self.wsConnected and
+						self.ownerComp.par.Port.eval() == port and
 						self.ownerComp.par.Address.eval() == rshipUrl):
 					self.ownerComp.par.Port = port
 					self.ownerComp.par.Address = rshipUrl
 					op.RS_LOG.Debug("[RshipExt]: Setting Rship host to", rshipUrl, "on port", port)
 					changed = True
-		
+
 		return changed
 
 # endregion Configuration Management
@@ -347,10 +370,10 @@ class RshipExt:
 		Only set offline targets that are in THIS response's upserts but not in our local cache.
 		"""
 		op.RS_LOG.Info(f"[RshipExt]: >>> targetListUpdated - received {len(data.upserts)} upserts, {len(data.deletes)} deletes")
-		
+
 		# Update our tracking of all remote keys
 		remoteKeys = set([target.item['id'] for target in data.upserts])
-		
+
 		for key in remoteKeys:
 			self.remoteKeys.add(key)
 
@@ -360,18 +383,20 @@ class RshipExt:
 		# Only process the upserts in this specific response
 		# If a target is in this response but not in our local cache, set it offline
 		allLocalKeys = set(self.allTouchTargets.keys())
-		
-		offlineCount = 0
+
+		offlineEvents = []
 		for target in data.upserts:
 			targetId = target.item['id']
 			if targetId not in allLocalKeys:
 				# Only send offline status if it's different from what we last sent
 				if targetId not in self.sentTargetStatuses or self.sentTargetStatuses[targetId] != Status.Offline:
-					CLIENT.setTargetOffline(targetId, self.instance.id)
+					offlineEvents.append(CLIENT.buildTargetStatusEvent(targetId, self.instance.id, Status.Offline))
 					self.sentTargetStatuses[targetId] = Status.Offline
-					offlineCount += 1
-		
-		op.RS_LOG.Info(f"[RshipExt]: <<< targetListUpdated - set {offlineCount} targets offline")
+
+		if offlineEvents:
+			CLIENT.sendEventBatch(offlineEvents)
+
+		op.RS_LOG.Info(f"[RshipExt]: <<< targetListUpdated - set {len(offlineEvents)} targets offline")
 		self.updateStatsPage(remoteTargets=len(remoteKeys))
 
 	def actionListUpdated(self, data: QueryResponse):
@@ -383,107 +408,178 @@ class RshipExt:
 
 	def OnRshipConnect(self):
 		CLIENT.setSend(self.websocketOp.sendText)
+		if self._drainRun is not None:
+			self._drainRun.kill()
+			self._drainRun = None
+		self._connectionGeneration += 1
+		self._deferredCommands.clear()
+		self._deferredBytes = 0
 		self.wsConnected = True
+		self.sentTargetStatuses.clear()
+		self._retryAt = 0.0
+		self._retryDelay = 1.0
 		self._transitionState(RshipState.CONNECTED)
-		
-		op.RS_LOG.Info("[RshipExt]: >>> OnRshipConnect START")
-		op.RS_LOG.Info("[RshipExt]: Connected to Rship Server at ", self.websocketOp.par.netaddress.eval())
-		
-		if not self._ensureReady():
-			op.RS_LOG.Warning("[RshipExt]: Connected but not ready - waiting for machine ID")
-			return
-		
-		# Send our data first, then query to clean up any stale remote targets
-		self._transitionState(RshipState.SYNCING)
-		op.RS_LOG.Info("[RshipExt]: Sending project data...")
 		self.refreshProjectData(sendEmitterValues=True)
-		op.RS_LOG.Info("[RshipExt]: Sending query for remote targets...")
-		# Query after sending to ensure our targets are registered before cleanup
-		CLIENT.sendQuery(
-			GetTargetsByQuery({
-				"serviceId": self.makeServiceId(),
-			}),
-			"Target",
-			self.targetListUpdated
-		)
-		CLIENT.sendQuery(
-			GetActionsByQuery({
-				"serviceId": self.makeServiceId(),
-				"schema": None,
-			}),
-			"Action",
-			self.actionListUpdated
-		)
-		CLIENT.sendQuery(
-			GetEmittersByQuery({
-				"serviceId": self.makeServiceId(),
-				"schema": None,
-			}),
-			"Emitter",
-			self.emitterListUpdated
-		)
-		self._transitionState(RshipState.CONNECTED)
-		op.RS_LOG.Info("[RshipExt]: <<< OnRshipConnect END")
-
 
 	def OnRshipDisconnect(self):
 		self.wsConnected = False
-		
-		# Transition back to appropriate state
-		if self._machineId:
-			self._transitionState(RshipState.READY)
-		else:
-			self._transitionState(RshipState.UNINITIALIZED)
-		
+		if self._drainRun is not None:
+			self._drainRun.kill()
+			self._drainRun = None
+		self._connectionGeneration += 1
+		self._deferredCommands.clear()
+		self._deferredBytes = 0
+		self._pendingPulses.clear()
+		self._pendingExplicitPulses.clear()
+		CLIENT.emitterValueProviders.clear()
+		if self.instance is not None:
+			self.instance.status = InstanceStatus.Starting.value
+		self._transitionState(RshipState.READY if self._machineId else RshipState.UNINITIALIZED)
 		self.sentTargetStatuses.clear()
 		self.updateStatsPage(remoteTargets=0, remoteActions=0, remoteEmitters=0)
 
-
 	def OnRshipReceivePing(self):
 		self.ownerComp.par.Lastping = datetime.datetime.now()
-		
-		# Only refresh if we weren't already connected and not currently syncing
-		if self.wsConnected is False and self.state != RshipState.SYNCING:
-			self.wsConnected = True
-			self._transitionState(RshipState.CONNECTED)
-			
-			if self._ensureReady():
-				self.refreshProjectData()
-
+		if not self.wsConnected:
+			self.OnRshipConnect()
 
 	def OnRshipReceiveText(self, text: str):
 		CLIENT.setSend(self.websocketOp.sendText)
+		try:
+			message = json.loads(text)
+		except (ValueError, TypeError):
+			CLIENT.parseMessage(text)
+			return
+		if isinstance(message, dict) and isinstance(message.get('event'), str) and not self.wsConnected:
+			self.OnRshipConnect()
+		data = message.get('data', {}) if isinstance(message, dict) else {}
+		if isinstance(message, dict) and message.get('event') == 'ws:m:command' and isinstance(data, dict) and data.get('commandId') in self.DEFERRED_COMMANDS:
+			if not self.wsConnected:
+				return
+			if self.state != RshipState.ACTIVE or self._deferredCommands or self._drainRun is not None:
+				size = len(text.encode('utf-8'))
+				if len(self._deferredCommands) >= self.MAX_DEFERRED_COMMANDS or self._deferredBytes + size > self.MAX_DEFERRED_BYTES:
+					CLIENT.sendCommandError(data.get('command', {}).get('tx', ''), data['commandId'], 'Executor loading queue is full')
+					return
+				self._deferredCommands.append((text, size))
+				self._deferredBytes += size
+				return
 		CLIENT.parseMessage(text)
 
+	def _drainCommands(self):
+		self._drainRun = None
+		generation = self._connectionGeneration
+		deadline = time.monotonic() + self.DRAIN_TIME_SECONDS
+		processed = 0
+		while self._deferredCommands and self.wsConnected and self.state == RshipState.ACTIVE and generation == self._connectionGeneration:
+			text, size = self._deferredCommands.popleft()
+			self._deferredBytes -= size
+			try:
+				CLIENT.parseMessage(text)
+			except Exception as error:
+				self._registrationFailed(error, generation)
+				return
+			processed += 1
+			if processed >= self.DRAIN_COMMAND_LIMIT or time.monotonic() >= deadline:
+				break
+		if self._deferredCommands and self.wsConnected and self.state == RshipState.ACTIVE and generation == self._connectionGeneration:
+			self._drainRun = run(self.DRAIN_RUN_SOURCE, self, delayFrames=1)
+
+
+	def _cancelScheduledRuns(self):
+		ownerPath = self.ownerComp.path
+		for scheduledRun in tuple(runs):
+			if not scheduledRun.isString:
+				continue
+			if scheduledRun.source not in (self.TICK_RUN_SOURCE, self.PULSE_FLUSH_RUN_SOURCE, self.DRAIN_RUN_SOURCE):
+				continue
+			if ownerPath not in str(scheduledRun.path):
+				continue
+			scheduledRun.kill()
+
+	def _scheduleTick(self):
+		if self._tickRun is not None and self._tickRun.active:
+			return
+		self._tickRun = run(
+			self.TICK_RUN_SOURCE,
+			self,
+			delayMilliSeconds=int(self._tickInterval * 1000),
+		)
 
 	def OnTickInterval(self):
+		self._tickRun = None
+		self._scheduleTick()
 		self.updateExecInfo()
+		if self.wsConnected and self.state not in (RshipState.ACTIVE, RshipState.SYNCING) and time.monotonic() >= self._retryAt:
+			self.refreshProjectData(sendEmitterValues=True)
 
 # endregion WebSocket Callbacks
 
 # region Project Management
 
 	def refreshProjectData(self, sendEmitterValues=False):
-		op.RS_LOG.Info(f"[RshipExt]: >>> refreshProjectData (sendEmitterValues={sendEmitterValues})")
-		if not self._ensureReady():
-			op.RS_LOG.Warning("[RshipExt]: Not ready, skipping refresh")
+		if self.state == RshipState.SYNCING or not self._ensureReady():
 			return
-
-		self.buildTargets()
-
-		if self.wsConnected:
-			self.sendProjectData(sendEmitterValues=sendEmitterValues)
-		else:
-			op.RS_LOG.Warning("[RshipExt]: Not connected to Rship Server, Attempting to reconnect")
+		if not self.wsConnected:
 			self.ownerComp.par.Reconnect.pulse()
-		
-		op.RS_LOG.Info("[RshipExt]: <<< refreshProjectData complete")
+			return
+		generation = self._connectionGeneration
+		self._transitionState(RshipState.SYNCING)
+		CLIENT.setSend(self.websocketOp.sendText)
+		try:
+			self.instance.status = InstanceStatus.Starting.value
+			self._sendRegistrationBatch([CLIENT.buildSetEvent(self.instance)], generation)
+			self.cookTargetList()
+			self.buildTargets()
+			self.sendProjectData(sendEmitterValues=sendEmitterValues)
+			if not self.wsConnected or generation != self._connectionGeneration:
+				return
+			self._retryDelay = 1.0
+			self._retryAt = 0.0
+			self._transitionState(RshipState.ACTIVE)
+			self._drainCommands()
+		except Exception as error:
+			self._registrationFailed(error, generation)
+
+	def _registrationFailed(self, error, generation):
+		op.RS_LOG.Error(f"[RshipExt]: Registration failed: {error}")
+		if generation != self._connectionGeneration:
+			return
+		self.sentTargetStatuses.clear()
+		self.instance.status = InstanceStatus.Starting.value
+		if self.wsConnected:
+			try:
+				self._sendRegistrationBatch([CLIENT.buildSetEvent(self.instance)], generation)
+			except Exception:
+				pass
+		self._transitionState(RshipState.CONNECTED if self.wsConnected else RshipState.READY)
+		self._retryAt = time.monotonic() + self._retryDelay
+		self._retryDelay = min(self._retryDelay * 2, 30.0)
+
 
 
 	def cookTargetList(self):
 		# op.RS_LOG.Info("[RshipExt]: Finding OpTargets...")
 		self.findTargetsOp.cook(force=True)
 		
+	def _indexTouchTargets(self, touchTargets):
+		"""Build a stable ID index and report collisions instead of hiding them."""
+		indexedTargets = {}
+		for touchTarget in touchTargets:
+			targetId = touchTarget.id
+			if targetId in indexedTargets:
+				existingTarget = indexedTargets[targetId]
+				existingOwner = getattr(getattr(existingTarget, 'ownerComp', None), 'path', '<unknown>')
+				duplicateOwner = getattr(getattr(touchTarget, 'ownerComp', None), 'path', '<unknown>')
+				op.RS_LOG.Error(
+					f"[RshipExt]: Duplicate TouchTarget ID {targetId}: "
+					f"keeping {type(existingTarget).__name__} at {existingOwner}, "
+					f"dropping {type(touchTarget).__name__} at {duplicateOwner}"
+				)
+				continue
+			indexedTargets[targetId] = touchTarget
+		return indexedTargets
+
 
 	def buildTargets(self):
 
@@ -515,121 +611,147 @@ class RshipExt:
 
 		# Track previously known targets
 		previousTargets = set(self.allTouchTargets.keys())
-		
-		self.allTouchTargets = {target.id: target for target in allTouchTargets}
-		
+
+		self.allTouchTargets = self._indexTouchTargets(allTouchTargets)
+
 		# Find targets that were removed locally
 		currentTargets = set(self.allTouchTargets.keys())
 		removedTargets = previousTargets - currentTargets
-		
+
 		# Mark removed targets as offline if we're connected
 		if self.wsConnected and self.instance:
+			offlineEvents = []
 			for targetId in removedTargets:
 				op.RS_LOG.Debug(f"[RshipExt]: Target {targetId} removed locally, setting offline")
 				if targetId not in self.sentTargetStatuses or self.sentTargetStatuses[targetId] != Status.Offline:
-					CLIENT.setTargetOffline(targetId, self.instance.id)
+					offlineEvents.append(CLIENT.buildTargetStatusEvent(targetId, self.instance.id, Status.Offline))
 					self.sentTargetStatuses[targetId] = Status.Offline
+			if offlineEvents:
+				CLIENT.sendEventBatch(offlineEvents)
 
 
 # endregion Project Management
 
 # region ws senders
 
-	def sendProjectData(self, sendEmitterValues = False):
+	def _pruneClientActions(self, currentActionIds: Set[str]):
+		serviceId = self.instance.serviceId
+		staleActionIds = [
+			actionId
+			for actionId, action in tuple(CLIENT.actions.items())
+			if getattr(action, 'serviceId', None) == serviceId
+			and actionId not in currentActionIds
+		]
+		for actionId in staleActionIds:
+			CLIENT.actions.pop(actionId, None)
+			CLIENT.handlers.pop(actionId, None)
+
+	def sendProjectData(self, sendEmitterValues=False):
 		if self.instance is None:
-			op.RS_LOG.Error("[RshipExt]: Instance is not set, cannot send project data")
-			return
-
+			raise RuntimeError("Instance is not configured")
+		generation = self._connectionGeneration
 		CLIENT.setSend(self.websocketOp.sendText)
-		events = [CLIENT.buildSetEvent(self.instance)]
-
+		allTouchTargetsById = self._indexTouchTargets(
+			[child for target in self.opTargets.values() for child in target.collectChildren()]
+		)
+		allTouchTargets = list(allTouchTargetsById.values())
+		allTargets = [target.getTarget() for target in allTouchTargets]
+		allActions = [action for target in allTouchTargets for action in target.getActions()]
+		allEmittersById = {}
+		for target in allTouchTargets:
+			for emitter in target.getEmitters():
+				allEmittersById.setdefault(emitter.id, emitter)
+		propertyEmitterIds = {action.writesTo['emitterId'] for action in allActions if hasattr(action, 'writesTo')}
+		emitterIndex = {}
+		emitterHandlers = {}
+		providers = {}
+		pulseEvents = []
+		pulseTargetIds = {target.id for target in allTargets if target.category in ('Pulse', 'Momentary')}
+		for emitter in allEmittersById.values():
+			handler = emitter.handler
+			for changeKey in getattr(emitter, 'changeKeys', [emitter.changeKey]):
+				emitterIndex.setdefault(changeKey, []).append(emitter)
+			emitterHandlers[emitter.id] = handler
+			if emitter.id in propertyEmitterIds:
+				providers[emitter.id] = handler
+			if handler is not None and (emitter.id in propertyEmitterIds or (sendEmitterValues and emitter.targetId not in pulseTargetIds)):
+				data = handler()
+				if data is not None:
+					pulseEvents.append(CLIENT.buildSetEvent(Pulse(id=emitter.id, emitterId=emitter.id, data=data)))
+			del emitter.handler
+			del emitter.changeKey
+			if hasattr(emitter, 'changeKeys'):
+				del emitter.changeKeys
+		if propertyEmitterIds != set(providers):
+			raise RuntimeError("Property writer has no value provider")
+		self._pruneClientActions({action.id for action in allActions})
+		for action in allActions:
+			CLIENT.saveHandler(action.id, action.handler)
+			del action.handler
+			CLIENT.actions[action.id] = action
+		CLIENT.instanceId = self.instance.id
+		CLIENT.emitterValueProviders = providers
+		self.allTouchTargets = allTouchTargetsById
+		self.emitterIndex = emitterIndex
+		self.emitterHandlers = emitterHandlers
+		self.updateStatsPage(localTargets=len(allTargets), localActions=len(allActions), localEmitters=len(allEmittersById))
+		events = []
 		for opTarget in self.opTargets.values():
 			streamInfo = opTarget.getStreamInfo()
 			if streamInfo is not None:
 				events.append(CLIENT.buildSetEvent(streamInfo))
+		events.extend(CLIENT.buildSetEvent(item) for item in [*allTargets, *allActions, *allEmittersById.values()])
+		self._sendRegistrationBatch(events, generation)
+		self._sendRegistrationBatch(pulseEvents, generation)
+		statusEvents = [CLIENT.buildTargetStatusEvent(target.id, self.instance.id, Status.Online) for target in allTargets]
+		self.instance.status = InstanceStatus.Available.value
+		statusEvents.append(CLIENT.buildSetEvent(self.instance))
+		self._sendRegistrationBatch(statusEvents, generation)
+		self.sentTargetStatuses.update({target.id: Status.Online for target in allTargets})
 
-		allTouchTargets = [child for target in self.opTargets.values() for child in target.collectChildren()]
-
-		allTargets = [target.getTarget() for target in allTouchTargets]
-		allActions = [action for target in allTouchTargets for action in target.getActions()]
-		allEmitters = [emitter for target in allTouchTargets for emitter in target.getEmitters()]
-
-		self.allTouchTargets = {target.id: target for target in allTouchTargets}
-		self.emitterIndex.clear()
-		self.emitterHandlers.clear()
-
-		op.RS_LOG.Info(f"[RshipExt]: Sending {len(allTargets)} targets, {len(allActions)} actions, {len(allEmitters)} emitters")
-		self.updateStatsPage(
-			localTargets=len(allTargets),
-			localActions=len(allActions),
-			localEmitters=len(allEmitters),
-		)
-		
-		statusesToSend = 0
-		for target in allTargets:
-			events.append(CLIENT.buildSetEvent(target))
-			
-			# Only send status if it's changed or never been sent
-			if target.id not in self.sentTargetStatuses or self.sentTargetStatuses[target.id] != Status.Online:
-				events.append(CLIENT.buildTargetStatusEvent(target.id, self.instance.id, Status.Online))
-				self.sentTargetStatuses[target.id] = Status.Online
-				statusesToSend += 1
-		
-		op.RS_LOG.Info(f"[RshipExt]: Sent {statusesToSend} target status updates (Online)")
-		
-		for action in allActions:
-			CLIENT.saveHandler(action.id, action.handler)
-			
-			del action.handler  # Remove handler from action to avoid circular references
-			CLIENT.actions[action.id] = action
-			events.append(CLIENT.buildSetEvent(action))
-
-		for emitter in allEmitters:
-			changeKeys = getattr(emitter, 'changeKeys', [emitter.changeKey])
-			for changeKey in changeKeys:
-				self.emitterIndex[changeKey] = emitter
-				self.emitterHandlers[changeKey] = emitter.handler
-			
-			del emitter.handler  # Remove handler from emitter to avoid circular references
-			del emitter.changeKey
-			if hasattr(emitter, 'changeKeys'):
-				del emitter.changeKeys
-			events.append(CLIENT.buildSetEvent(emitter))
-
+	def _sendRegistrationBatch(self, events, generation):
+		if not self.wsConnected or generation != self._connectionGeneration:
+			raise RuntimeError("Connection changed during registration")
 		CLIENT.sendEventBatch(events)
-
-		if not sendEmitterValues:
-			return
-
-		for key, handler in self.emitterHandlers.items():
-			emitter = self.emitterIndex.get(key, None)
-			if (emitter is not None) and (handler is not None):
-				data = handler()
-				CLIENT.pulseEmitter(emitter.id, data)
+		if not self.wsConnected or generation != self._connectionGeneration:
+			raise RuntimeError("Connection changed during registration")
 
 
-	def PulseEmitter(self, opPath: str, parName: str):
-		CLIENT.setSend(self.websocketOp.sendText)
+	def PulseEmitter(self, opPath: str, parName: str, preserveDuplicate: bool = False):
 		changeKey = makeEmitterChangeKey(opPath, parName)
 
-		emitter = self.emitterIndex.get(changeKey, None)
-		if emitter is None:
-			op.RS_LOG.Debug(f"[RshipExt]: No emitter found for change key {changeKey}")
-			return
-		
-		handler = self.emitterHandlers.get(changeKey, None)
+		emitters = self.emitterIndex.get(changeKey, ())
+		for emitter in emitters:
+			handler = self.emitterHandlers.get(emitter.id)
+			if handler is None:
+				continue
+			data = handler()
+			if data is None:
+				continue
+			pulseEvent = CLIENT.buildSetEvent(Pulse(
+				id=emitter.id,
+				emitterId=emitter.id,
+				data=data,
+			))
+			if preserveDuplicate and emitter.id not in CLIENT.emitterValueProviders:
+				self._pendingExplicitPulses.append(pulseEvent)
+			else:
+				self._pendingPulses[emitter.id] = pulseEvent
+		if (self._pendingPulses or self._pendingExplicitPulses) and not self._pulseFlushScheduled:
+			self._pulseFlushScheduled = True
+			run(self.PULSE_FLUSH_RUN_SOURCE, self, delayFrames=0)
 
-		if handler is None:
-			op.RS_LOG.Debug(f"[RshipExt]: No handler found for emitter {changeKey}")
+	def _flushPulses(self):
+		self._pulseFlushScheduled = False
+		pulseEvents = list(self._pendingPulses.values()) + self._pendingExplicitPulses
+		if not pulseEvents or not self.wsConnected or self.state != RshipState.ACTIVE:
+			self._pendingPulses.clear()
+			self._pendingExplicitPulses.clear()
 			return
-		
-		data = handler()
-
-		if data is None:
-			op.RS_LOG.Debug(f"[RshipExt]: No data returned from emitter handler for {changeKey}")
-			return
-		
-		CLIENT.pulseEmitter(emitter.id, data)
+		CLIENT.setSend(self.websocketOp.sendText)
+		CLIENT.sendEventBatch(pulseEvents)
+		self._pendingPulses.clear()
+		self._pendingExplicitPulses.clear()
 
 	def makeServiceId(self):
 
@@ -639,7 +761,7 @@ class RshipExt:
 
 		projectfile = project.name
 		sections = projectfile.split(".")
-		
+
 		serviceId = sections[0]
 
 		return serviceId

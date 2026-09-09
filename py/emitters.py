@@ -35,7 +35,13 @@ def onValuesChanged(changes):
 	return
 
 def onPulse(par):
-	me.ext.RshipExt.PulseEmitter(par.owner, _getEmitterParGroupName(par.parGroup))
+	# Preserve every explicit pulse. Generator Emit/Clear can both occur within
+	# one frame while traveling-wave mode is active and must not be coalesced.
+	me.ext.RshipExt.PulseEmitter(
+		par.owner,
+		_getEmitterParGroupName(par.parGroup),
+		preserveDuplicate=True,
+	)
 	return
 
 def onExpressionChange(par, val, prev):

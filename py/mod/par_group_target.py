@@ -1,19 +1,24 @@
 from datetime import datetime, timezone
-from exec import Target, Action, Emitter, Instance
+from exec import Target, Action, Emitter, Instance, makeWriterRef
 from typing import Dict, List
 from par_shape import buildShape
 from target import TouchTarget
 from util import makeEmitterChangeKey
 from exec import CLIENT
 
+def supportsProperties(ownerComp) -> bool:
+    return "rship-no-properties" not in getattr(ownerComp, "tags", ())
+
+
 class ParGroupTarget(TouchTarget):
-    def __init__(self, parentId: str, opTargetId: str,  ownerComp: OP, parGroup: ParGroup, instance: Instance):
+    def __init__(self, parentId: str, opTargetId: str,  ownerComp: OP, parGroup: ParGroup, instance: Instance, allowProperties: bool = True):
         
         super().__init__(instance)
         self.ownerComp = ownerComp
         self.parentId = parentId
         self.opTargetId = opTargetId
         self.parGroup = parGroup
+        self.isProperty = allowProperties and parGroup.style not in ("Pulse", "Momentary", "Sequence") and getattr(parGroup, "sequence", None) is None
         self.parShape = buildShape( ownerComp, parGroup)
         op.RS_LOG.Debug(f"[ParGroupTarget]: Initializing ParGroupTarget for {self.parGroup.name} at {self.ownerComp.path}")
 
@@ -48,7 +53,10 @@ class ParGroupTarget(TouchTarget):
         }
 
         def handleSetAction(action: Action, data: Dict[str, any]):
-            return self.parShape.setData(data)
+            result = self.parShape.setData(data)
+            if self.isProperty:
+                CLIENT.pulseEmitter(f"{self.id}:updated", self.parShape.buildData())
+            return result
 
         setAction = Action(
             id=f"{self.id}:set",
@@ -56,7 +64,8 @@ class ParGroupTarget(TouchTarget):
             targetId=self.id,
             schema=schema,
             serviceId=self.instance.serviceId,
-            handler=handleSetAction
+            handler=handleSetAction,
+            writesTo=makeWriterRef(f"{self.id}:updated") if self.isProperty else None,
         )
 
         def handleResendAction(action: Action, data: Dict[str, any]):
@@ -87,7 +96,7 @@ class ParGroupTarget(TouchTarget):
 
         setEmitter = Emitter(
             id=f"{self.id}:updated",
-            name=f"{self.parGroup.name} Updated",
+            name=self.parGroup.name if self.isProperty else f"{self.parGroup.name} Updated",
             targetId=self.id,
             serviceId=self.instance.serviceId,
             schema=schema,
