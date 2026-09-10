@@ -2,3 +2,6 @@ sync.ffs_db
 TDLogs/.log
 __pycache__/
 *.py[cod]
+.DS_Store
+.vs/
+logs/RshipTox_rs_log.log
