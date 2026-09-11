@@ -1,5 +1,7 @@
 sync.ffs_db
 TDLogs/.log
+.DS_Store
+.vs/
 
 # Python bytecode
 __pycache__/
