@@ -78,4 +78,4 @@ target/action/emitter counts).
   `connection.py` (connection state machine), `op_target.py` + `*_target.py`/`par_shape.py`
   (tag-based target model).
 - `py/example_ext*.py` — Python API examples.
-- `docs/` — the two workflow guides.
+- `docs/` — workflow guides, including [template comp engines](docs/template-comp-engine.md).

@@ -19,6 +19,7 @@ KindHandler / CompEngineProxy). See memory rship-comp-engine for the full spec/c
 The native wire contract is pinned to rship b8a2739dd4.
 """
 import dataclasses
+import hashlib
 import math
 import typing
 
@@ -232,6 +233,249 @@ class KindDefBuilder:
     def instance_ordering(self, v): self._k.instance_ordering = v; return self
     def instance_capacity(self, c: CapacityConstraint): self._k.instance_capacity = c; return self
     def build(self) -> KindDef: return self._k
+
+# endregion
+
+
+# region template BASE kinds
+
+RSHIP_KIND_TAG = "rship-comp-kind"
+RSHIP_KIND_PAGE = "Rship Kind"
+RSHIP_KIND_PORTS = "rship_kind_ports"
+_REPLICA_MARKER = "rship_comp_replica"
+
+
+@dataclasses.dataclass(frozen=True)
+class ParBinding:
+    id: str
+    par_group: str
+
+
+@dataclasses.dataclass(frozen=True)
+class InputBinding:
+    definition: InputDef
+    connector_index: int
+    family: str | None
+
+
+@dataclasses.dataclass(frozen=True)
+class OutputBinding:
+    definition: OutputChannelDef
+    connector_index: int
+    family: str | None
+
+
+@dataclasses.dataclass(frozen=True)
+class BaseKindSpec:
+    """A template BASE compiled into a KindDef plus its local TD bindings.
+
+    The KindDef is the server-visible declaration. Everything else stays local and
+    tells the materializer which copied parameter or connector implements each id.
+    """
+    kind: KindDef
+    template_path: str
+    caps: tuple = ()
+    triggers: tuple = ()
+    inputs: tuple = ()
+    outputs: tuple = ()
+
+    @classmethod
+    def reflect(cls, template, *, kind_id=None, display_name=None,
+                payload_schema="CompElementClipPayload", ports=None):
+        if template is None or getattr(template, "OPType", None) != "baseCOMP":
+            raise ValueError("template kind must be a valid baseCOMP")
+        kind_id = kind_id or _eval_par(template, "Kindid")
+        if not isinstance(kind_id, str) or not kind_id.strip():
+            raise ValueError(f"template {template.path} needs a stable Kindid")
+        kind_id = kind_id.strip()
+        display_name = display_name or _eval_par(template, "Displayname") or template.name
+        instanceability = _eval_par(template, "Instanceability") or Instanceability.INSTANCEABLE
+        instance_ordering = _eval_par(template, "Instanceordering") or InputOrdering.UNORDERED
+        max_instances = _eval_par(template, "Maxinstances")
+
+        cap_defs, trigger_defs = [], []
+        cap_bindings, trigger_bindings = [], []
+        ids = set()
+        for page in getattr(template, "customPages", ()):
+            if page.name == RSHIP_KIND_PAGE:
+                continue
+            for pg in page.parGroups:
+                if pg.style == "Header":
+                    continue
+                if getattr(pg, "sequence", None) is not None:
+                    raise ValueError(f"template {template.path} cannot reflect sequence parameter {pg.name}")
+                if pg.name in ids:
+                    raise ValueError(f"template {template.path} has duplicate parameter id {pg.name}")
+                ids.add(pg.name)
+                if par_schema.is_trigger(pg):
+                    trigger_defs.append(TriggerDef(pg.name, pg.label or pg.name))
+                    trigger_bindings.append(ParBinding(pg.name, pg.name))
+                else:
+                    if any(getattr(par, "mode", ParMode.CONSTANT) != ParMode.CONSTANT for par in pg):
+                        continue
+                    ref = par_schema.schema_ref(pg) or par_schema.custom_schema_ref(pg)
+                    if ref is None:
+                        raise ValueError(f"template {template.path} cannot type parameter {pg.name}")
+                    cap_defs.append(custom_cap(
+                        pg.name, ref, default=par_schema.read_default(pg), label=pg.label or pg.name))
+                    cap_bindings.append(ParBinding(pg.name, pg.name))
+
+        port_rows = _port_rows(template, ports)
+        input_bindings, output_bindings = _reflect_ports(template, port_rows)
+        if instanceability not in (Instanceability.INSTANCEABLE, Instanceability.SINGLETON):
+            raise ValueError(f"template {template.path} has invalid Instanceability")
+        if instance_ordering not in (InputOrdering.UNORDERED, InputOrdering.ORDERED):
+            raise ValueError(f"template {template.path} has invalid Instanceordering")
+        if max_instances not in (None, "", 0, "0") and int(max_instances) <= 0:
+            raise ValueError(f"template {template.path} Maxinstances must be positive")
+        kind = KindDef(
+            id=kind_id,
+            display_name=str(display_name),
+            payload_schema=payload_schema,
+            cap_schema=cap_defs,
+            trigger_schema=trigger_defs,
+            output_channels=[binding.definition for binding in output_bindings],
+            inputs=[binding.definition for binding in input_bindings],
+            instanceability=str(instanceability),
+            instance_ordering=str(instance_ordering),
+            instance_capacity=(CapacityConstraint(int(max_instances))
+                               if max_instances not in (None, "", 0, "0") else None),
+        )
+        return cls(kind, template.path, tuple(cap_bindings), tuple(trigger_bindings),
+                   tuple(input_bindings), tuple(output_bindings))
+
+
+def _eval_par(comp, name):
+    try:
+        par = comp.par[name]
+    except Exception:
+        par = getattr(getattr(comp, "par", None), name, None)
+    if par is None:
+        return None
+    try:
+        return par.eval()
+    except Exception:
+        return getattr(par, "val", None)
+
+
+def _cell_text(cell) -> str:
+    value = getattr(cell, "val", cell)
+    return "" if value is None else str(value).strip()
+
+
+def _port_rows(template, explicit):
+    if explicit is not None:
+        return [dict(row) for row in explicit]
+    table = template.op(RSHIP_KIND_PORTS) if hasattr(template, "op") else None
+    if table is None:
+        return None
+    rows = list(table.rows())
+    if not rows:
+        return []
+    headers = [_cell_text(cell) for cell in rows[0]]
+    required = {"direction", "id", "index"}
+    if not required.issubset(headers):
+        raise ValueError(f"{table.path} needs columns direction,id,index")
+    return [dict(zip(headers, (_cell_text(cell) for cell in row))) for row in rows[1:]
+            if any(_cell_text(cell) for cell in row)]
+
+
+def _connector_family(connector, direction):
+    endpoint = getattr(connector, "inOP" if direction == "in" else "outOP", None)
+    return getattr(endpoint, "family", None)
+
+
+def _connector_name(connector, direction, index):
+    description = str(getattr(connector, "description", "") or "").strip()
+    endpoint = getattr(connector, "inOP" if direction == "in" else "outOP", None)
+    return description or getattr(endpoint, "name", None) or f"{direction}{index}"
+
+
+def _bool_cell(value) -> bool:
+    return str(value or "").strip().lower() in ("1", "true", "yes", "on")
+
+
+def _reflect_ports(template, rows):
+    connectors = {
+        "in": list(getattr(template, "inputConnectors", ())),
+        "out": list(getattr(template, "outputConnectors", ())),
+    }
+    if rows is None:
+        rows = []
+        for direction, values in connectors.items():
+            for index, connector in enumerate(values):
+                name = _connector_name(connector, direction, index)
+                rows.append({"direction": direction, "id": name, "index": index,
+                             "channel": name})
+
+    input_bindings, output_bindings = [], []
+    seen = {"in": set(), "out": set()}
+    covered = {"in": set(), "out": set()}
+    for row in rows:
+        direction = str(row.get("direction", "")).strip().lower()
+        if direction not in connectors:
+            raise ValueError(f"template {template.path} port direction must be in or out")
+        port_id = str(row.get("id", "")).strip()
+        if not port_id or port_id in seen[direction]:
+            raise ValueError(f"template {template.path} has invalid duplicate {direction} port id {port_id!r}")
+        seen[direction].add(port_id)
+        try:
+            index = int(row.get("index"))
+        except (TypeError, ValueError):
+            raise ValueError(f"template {template.path} port {port_id} has invalid index")
+        if index < 0 or index >= len(connectors[direction]) or index in covered[direction]:
+            raise ValueError(f"template {template.path} port {port_id} does not map one connector")
+        covered[direction].add(index)
+        family = _connector_family(connectors[direction][index], direction)
+        label = str(row.get("displayName") or port_id)
+        channel = str(row.get("channel") or port_id).strip()
+        if direction == "in":
+            if _bool_cell(row.get("fanIn")):
+                raise ValueError(f"template {template.path} port {port_id} cannot use fanIn")
+            accepts = row.get("accepts", ())
+            if isinstance(accepts, str):
+                accepts = tuple(value.strip() for value in accepts.split(",") if value.strip())
+            required = row.get("requiredMin")
+            if not channel:
+                raise ValueError(f"template {template.path} input {port_id} needs a channel")
+            if required not in (None, "") and int(required) < 0:
+                raise ValueError(f"template {template.path} input {port_id} has invalid requiredMin")
+            definition = InputDef(
+                port_id, label, list(accepts), channel, fan_in=False,
+                ordering=str(row.get("ordering") or InputOrdering.UNORDERED),
+                required_min=(int(required) if required not in (None, "") else None),
+            )
+            input_bindings.append(InputBinding(definition, index, family))
+        else:
+            type_name = str(row.get("schema") or "").strip()
+            semantic = str(row.get("semantic") or "").strip()
+            if not type_name:
+                type_name, inferred_semantic = {
+                    "TOP": ("Texture", "texture"),
+                    "CHOP": ("Signal", "signal"),
+                }.get(family, (None, None))
+                semantic = semantic or inferred_semantic
+            if not type_name or not semantic:
+                raise ValueError(f"template {template.path} output {port_id} needs schema and semantic")
+            output_bindings.append(OutputBinding(
+                OutputChannelDef(port_id, label, schema(type_name), semantic), index, family))
+    for direction, values in connectors.items():
+        if len(covered[direction]) != len(values):
+            raise ValueError(f"template {template.path} port table must cover every {direction} connector")
+    return input_bindings, output_bindings
+
+
+def child_kind_bases(container):
+    return tuple(sorted(
+        (child for child in getattr(container, "children", ()) if getattr(child, "OPType", None) == "baseCOMP"),
+        key=lambda child: child.path))
+
+
+def tagged_kind_bases(root, tag=RSHIP_KIND_TAG):
+    found = root.findChildren(tags=[tag]) if hasattr(root, "findChildren") else ()
+    return tuple(sorted(
+        (child for child in found if getattr(child, "OPType", None) == "baseCOMP"),
+        key=lambda child: child.path))
 
 # endregion
 
@@ -604,6 +848,243 @@ class KindHandler:
         "value": <new value>}."""
         self.on_apply(ctx, ctx.engine._batch_for_kind(kind_id))
 
+
+class _TemplateKindHandler(KindHandler):
+    """Trigger adapter. Structural and value projection is engine-wide."""
+    wants_tick = False
+
+    def __init__(self):
+        self.materializer = None
+
+    def on_apply(self, ctx, batch):
+        ctx.engine._template_materializer.reconcile()
+
+    def on_value(self, ctx, instance, kind_id, change):
+        ctx.engine._template_materializer.apply_value(
+            instance.get("compElementId"), change or {})
+
+    def on_button_pressed(self, instance, button_id, data):
+        if self.materializer is None:
+            raise RuntimeError("template materializer is not ready")
+        self.materializer.fire(instance.get("compElementId"), button_id)
+
+# endregion
+
+
+# region template BASE materialization
+
+@dataclasses.dataclass(frozen=True)
+class NativeOutputEndpoint:
+    connector: typing.Any
+    family: str | None
+
+
+def _native_output_ports() -> dict:
+    ports = getattr(td, "_rship_native_output_ports", None)
+    if ports is None:
+        ports = {}
+        td._rship_native_output_ports = ports
+    return ports
+
+
+def _find_par_group(comp, name):
+    for page in getattr(comp, "customPages", ()):
+        for pg in page.parGroups:
+            if pg.name == name:
+                return pg
+    return None
+
+
+class BaseReplicaMaterializer:
+    """Converges required elements onto copied BASEs and native TD wires."""
+    def __init__(self, engine):
+        self.engine = engine
+        self.replicas = {}
+        self._recovered = False
+
+    @property
+    def parent(self):
+        return self.engine.args.replica_parent or self.engine.ownerComp
+
+    def _template(self, spec):
+        template = op(spec.template_path)
+        if template is None or not getattr(template, "valid", True):
+            raise ValueError(f"template BASE is missing: {spec.template_path}")
+        return template
+
+    def _replica_name(self, kind_id, element_id):
+        slug = ("".join(c if c.isalnum() else "_" for c in kind_id).strip("_") or "kind")[:40]
+        digest = hashlib.sha1(str(element_id).encode("utf-8")).hexdigest()[:12]
+        return f"rship_{slug}_{digest}"
+
+    def _remember(self, replica, kind_id, element_id):
+        values = {
+            _REPLICA_MARKER: True,
+            "rship_comp_engine_key": self.engine.key,
+            "rship_comp_element_id": element_id,
+            "rship_comp_kind_id": kind_id,
+        }
+        for key, value in values.items():
+            if hasattr(replica, "store"):
+                replica.store(key, value)
+            else:
+                replica.storage[key] = value
+        try:
+            replica.tags.remove(RSHIP_KIND_TAG)
+        except Exception:
+            pass
+
+    def _stored(self, comp, key):
+        storage = getattr(comp, "storage", {})
+        try:
+            return storage.get(key)
+        except Exception:
+            return None
+
+    def _recover(self):
+        if self._recovered:
+            return
+        self._recovered = True
+        specs = self.engine.args.kind_registry.templates
+        for replica in getattr(self.parent, "children", ()):
+            if not self._stored(replica, _REPLICA_MARKER):
+                continue
+            if self._stored(replica, "rship_comp_engine_key") != self.engine.key:
+                continue
+            element_id = self._stored(replica, "rship_comp_element_id")
+            kind_id = self._stored(replica, "rship_comp_kind_id")
+            if element_id is None or kind_id not in specs or element_id in self.replicas:
+                continue
+            self.replicas[element_id] = {"op": replica, "kind": kind_id, "spec": specs[kind_id]}
+
+    def _create(self, kind_id, element_id):
+        spec = self.engine.args.kind_registry.templates[kind_id]
+        replica = self.parent.copy(
+            self._template(spec), name=self._replica_name(kind_id, element_id))
+        self._remember(replica, kind_id, element_id)
+        self.replicas[element_id] = {"op": replica, "kind": kind_id, "spec": spec}
+        return self.replicas[element_id]
+
+    def _disconnect_inputs(self, record):
+        replica = record["op"]
+        for binding in record["spec"].inputs:
+            try:
+                replica.inputConnectors[binding.connector_index].disconnect()
+            except Exception:
+                pass
+
+    def _unregister_outputs(self, element_id, record):
+        ports = _native_output_ports()
+        for binding in record["spec"].outputs:
+            ports.pop((self.engine.id, element_id, binding.definition.id), None)
+
+    def _remove(self, element_id):
+        record = self.replicas.pop(element_id, None)
+        if record is None:
+            return
+        self._disconnect_inputs(record)
+        self._unregister_outputs(element_id, record)
+        replica = record["op"]
+        if getattr(replica, "valid", True):
+            replica.destroy()
+
+    def _apply_caps(self, element_id, caps):
+        record = self.replicas[element_id]
+        bindings = {binding.id: binding for binding in record["spec"].caps}
+        for cap_id, value in caps.items():
+            if value is None:
+                continue
+            binding = bindings.get(cap_id)
+            if binding is None:
+                raise ValueError(f"unknown cap {cap_id} on kind {record['kind']}")
+            pg = _find_par_group(record["op"], binding.par_group)
+            if pg is None or not par_schema.write(pg, value):
+                raise ValueError(f"cannot write cap {cap_id} on replica {element_id}")
+
+    def _register_outputs(self, element_id, record):
+        replica = record["op"]
+        ports = _native_output_ports()
+        for binding in record["spec"].outputs:
+            connector = replica.outputConnectors[binding.connector_index]
+            ports[(self.engine.id, element_id, binding.definition.id)] = NativeOutputEndpoint(
+                connector, binding.family)
+
+    def reconcile(self):
+        self._recover()
+        desired = {}
+        for element_id, slot_state in self.engine._slots.items():
+            slot = slot_state["slot"]
+            kind_id = slot.get("kind")
+            if kind_id in self.engine.args.kind_registry.templates:
+                desired[element_id] = (kind_id, slot_state)
+
+        for element_id in list(self.replicas):
+            wanted = desired.get(element_id)
+            if wanted is None or self.replicas[element_id]["kind"] != wanted[0]:
+                self._remove(element_id)
+
+        for element_id, (kind_id, slot_state) in desired.items():
+            if element_id not in self.replicas:
+                self._create(kind_id, element_id)
+            self._apply_caps(element_id, slot_state["state"]["bag"])
+
+        for element_id, record in self.replicas.items():
+            self._register_outputs(element_id, record)
+        self.connect_wires(strict=False)
+
+    def connect_wires(self, strict=True):
+        for record in self.replicas.values():
+            self._disconnect_inputs(record)
+        ports = _native_output_ports()
+        missing = []
+        for element_id, record in self.replicas.items():
+            slot_state = self.engine._slots.get(element_id)
+            if slot_state is None:
+                continue
+            record = self.replicas[element_id]
+            input_bindings = {binding.definition.id: binding for binding in record["spec"].inputs}
+            for wire in slot_state["slot"].get("wireInputValues", ()):
+                pin_id = wire.get("pinId")
+                binding = input_bindings.get(pin_id)
+                if binding is None:
+                    raise ValueError(f"unknown input {pin_id} on replica {element_id}")
+                source = wire.get("source") or {}
+                source_instance = source.get("sourceInstance") or {}
+                key = (source.get("sourceEngineId"), source_instance.get("compElementId"),
+                       source.get("outputChannelId"))
+                endpoint = ports.get(key)
+                if endpoint is None:
+                    missing.append((element_id, pin_id, key))
+                    continue
+                if binding.family and endpoint.family and binding.family != endpoint.family:
+                    raise ValueError(
+                        f"native connector family mismatch for input {pin_id}: "
+                        f"{endpoint.family} to {binding.family}")
+                endpoint.connector.connect(
+                    record["op"].inputConnectors[binding.connector_index])
+        if strict and missing:
+            element_id, pin_id, key = missing[0]
+            raise ValueError(
+                f"native output {key!r} is unavailable for input {pin_id} on replica {element_id}")
+        return not missing
+
+    def apply_value(self, element_id, change):
+        if element_id not in self.replicas:
+            return
+        if change.get("what") == "cap":
+            self._apply_caps(element_id, {change.get("cap_id"): change.get("value")})
+
+    def fire(self, element_id, trigger_id):
+        record = self.replicas.get(element_id)
+        if record is None:
+            raise ValueError("trigger replica is not materialized")
+        binding = next((item for item in record["spec"].triggers if item.id == trigger_id), None)
+        if binding is None:
+            raise ValueError(f"unknown trigger {trigger_id}")
+        pg = _find_par_group(record["op"], binding.par_group)
+        if pg is None or not par_schema.write(pg, None):
+            raise ValueError(f"cannot fire trigger {trigger_id}")
+
 # endregion
 
 
@@ -613,6 +1094,7 @@ class KindRegistry:
     def __init__(self):
         self.kinds: typing.Dict[str, KindDef] = {}
         self.handlers: typing.Dict[str, KindHandler] = {}
+        self.templates: typing.Dict[str, BaseKindSpec] = {}
 
     def get(self, kind_id): return self.kinds.get(kind_id)
     def to_wire(self) -> dict:
@@ -632,6 +1114,38 @@ class KindRegistryBuilder:
     def register_with_handler(self, kind: KindDef, handler: KindHandler):
         self.register(kind)
         self._reg.handlers[kind.id] = handler
+        return self
+
+    def register_base(self, template, spec=None, **reflect_args):
+        """Register a self-describing template BASE or an explicit BaseKindSpec."""
+        if spec is None:
+            spec = template if isinstance(template, BaseKindSpec) else BaseKindSpec.reflect(
+                template, **reflect_args)
+        elif reflect_args:
+            raise ValueError("reflect arguments cannot be combined with spec")
+        if not isinstance(spec, BaseKindSpec):
+            raise TypeError("spec must be a BaseKindSpec")
+        self.register(spec.kind)
+        self._reg.templates[spec.kind.id] = spec
+        self._reg.handlers[spec.kind.id] = _TemplateKindHandler()
+        return self
+
+    def register_children(self, container, **reflect_args):
+        for template in child_kind_bases(container):
+            self.register_base(template, **reflect_args)
+        return self
+
+    def register_tagged(self, root, tag=RSHIP_KIND_TAG, **reflect_args):
+        for template in tagged_kind_bases(root, tag):
+            self.register_base(template, **reflect_args)
+        return self
+
+    def register_all(self, values):
+        for value in values:
+            if isinstance(value, BaseKindSpec) or getattr(value, "OPType", None) == "baseCOMP":
+                self.register_base(value)
+            else:
+                raise TypeError("register_all accepts template BASEs or BaseKindSpecs")
         return self
 
     def build(self) -> KindRegistry:
@@ -786,6 +1300,7 @@ class CompEngineArgs:
     kind_registry: KindRegistry
     host_target: typing.Any = None      # optional: nest under a user-facing Target
     prep_timeout_ms: int = 5000
+    replica_parent: typing.Any = None   # template BASE copies; defaults to ownerComp
 
 
 def comp_engine(ownerComp, args: CompEngineArgs) -> "CompEngineProxy":
@@ -891,6 +1406,11 @@ class CompEngineProxy:
         # _render) so values SURVIVE an unrelated re-apply instead of resetting to None/disabled.
         self._inst_state: typing.Dict[tuple, dict] = {}          # ik -> {"bag": {capId: val}, "presence": val}
         self._readback_last: typing.Dict[str, typing.Any] = {}   # emitterId -> last pulsed (dedup)
+        self._template_materializer = (BaseReplicaMaterializer(self)
+                                       if args.kind_registry.templates else None)
+        if self._template_materializer is not None:
+            for kind_id in args.kind_registry.templates:
+                args.kind_registry.handlers[kind_id].materializer = self._template_materializer
 
     # --- identity ---
     @property
@@ -1052,7 +1572,11 @@ class CompEngineProxy:
         # SequenceReflector collapses to numBlocks=1 / length 0). Without this a 2->0 apply
         # leaves the kind's last render stale.
         kinds = {s["slot"].get("kind") for s in self._slots.values()} | prev_kinds
+        if self._template_materializer is not None:
+            self._template_materializer.reconcile()
         for kind_id in sorted(kinds, key=lambda k: 0 if (reg.get(k) and reg.get(k).output_channels) else 1):
+            if kind_id in reg.templates:
+                continue
             self._project_kind(kind_id, transaction_id)
 
     def tick(self):
@@ -1065,6 +1589,8 @@ class CompEngineProxy:
         kinds = {s["slot"].get("kind") for s in self._slots.values()
                  if s["slot"].get("wireInputValues")}
         for kind_id in kinds:
+            if kind_id in self.args.kind_registry.templates:
+                continue
             handler = self.args.kind_registry.handlers.get(kind_id)
             if handler is not None and not getattr(handler, "wants_tick", True):
                 continue
@@ -1079,6 +1605,9 @@ class CompEngineProxy:
         if s is None:
             return
         kind_id = s["slot"].get("kind")
+        if self._template_materializer is not None and kind_id in self.args.kind_registry.templates:
+            self._template_materializer.apply_value(ik, change or {})
+            return
         handler = self.args.kind_registry.handlers.get(kind_id)
         if handler is None:
             return
@@ -1166,17 +1695,31 @@ class RequiredCompEngineController:
         desired = self._eligible(desired, dependencies)
         old = self.desired
         self.desired = desired
+        pending_template_renders = []
         for engine_id, engine in self.engines.items():
             before = {k: v for k, v in old.items() if k[0] == engine_id}
             after = {k: v for k, v in desired.items() if k[0] == engine_id}
             if self._structures(before) != self._structures(after):
-                self._render_engine(engine, before, after)
+                defer_ready = getattr(engine, "_template_materializer", None) is not None
+                if self._render_engine(engine, before, after, finalize=not defer_ready) and defer_ready:
+                    pending_template_renders.append((engine, before, after))
             else:
                 self._apply_value_changes(engine, before, after)
                 if change.reset:
                     for key, item in after.items():
                         self._observe_components(key, item)
                         self._observe_element(key, 'ready', None, item['value'])
+        try:
+            for engine in self.engines.values():
+                if getattr(engine, "_template_materializer", None) is not None:
+                    engine._template_materializer.connect_wires(strict=True)
+        except Exception as error:
+            for _engine, _before, after in pending_template_renders:
+                for key in after:
+                    self._observe_element(key, 'failed', str(error), None)
+            return
+        for _engine, before, after in pending_template_renders:
+            self._finalize_render(before, after)
 
     def _parse(self, rows):
         elements = {}
@@ -1276,7 +1819,7 @@ class RequiredCompEngineController:
             })
         return {'slotStates': slots, 'overflow': [], 'generation': 0}
 
-    def _render_engine(self, engine, before, after):
+    def _render_engine(self, engine, before, after, finalize=True):
         for key, item in before.items():
             if key not in after or self._structures({key: item}) != self._structures({key: after[key]}):
                 self._observe_element(key, 'removing', None, item['value'])
@@ -1291,7 +1834,12 @@ class RequiredCompEngineController:
         except Exception as error:
             for key, item in after.items():
                 self._observe_element(key, 'failed', str(error), None)
-            return
+            return False
+        if finalize:
+            self._finalize_render(before, after)
+        return True
+
+    def _finalize_render(self, before, after):
         for key, item in before.items():
             if key not in after:
                 self._observe_element(key, 'removed', None, None)
