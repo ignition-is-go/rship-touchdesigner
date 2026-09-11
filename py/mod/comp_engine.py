@@ -907,6 +907,8 @@ class BaseReplicaMaterializer:
         return self.engine.args.replica_parent or self.engine.ownerComp
 
     def _template(self, spec):
+        if not spec.template_path.startswith(self.engine.ownerComp.path.rstrip('/') + '/'):
+            raise ValueError(f'kind {spec.kind.id} must live inside its engine BASE')
         template = op(spec.template_path)
         if template is None or not getattr(template, "valid", True):
             raise ValueError(f"template BASE is missing: {spec.template_path}")
@@ -1307,6 +1309,7 @@ def comp_engine(ownerComp, args: CompEngineArgs) -> "CompEngineProxy":
     """Stand up (or replace) a comp engine. Registered into the td-anchored engine
     registry; RshipExt publishes the engine Target + reserved verbs and the engine
     renders Assignments. Strictly opt-in."""
+    _validate_engine_layout(ownerComp, args)
     key = f"{ownerComp.path}:{args.short_id}"
     proxy = CompEngineProxy(ownerComp, args, key)
     _engines()[key] = proxy
@@ -1319,71 +1322,28 @@ def comp_engine(ownerComp, args: CompEngineArgs) -> "CompEngineProxy":
     return proxy
 
 
-def _engine_slug(name: str) -> str:
-    return "".join(c if c.isalnum() else "-" for c in str(name).lower()).strip("-") or "engine"
+def _validate_engine_layout(owner, args):
+    if not isinstance(owner, td.baseCOMP):
+        raise ValueError('a comp engine must be a BASE')
+    prefix = owner.path.rstrip('/') + '/'
+    missing = set(args.kind_registry.kinds) - set(args.kind_registry.templates)
+    if missing:
+        raise ValueError('every comp-engine kind needs a template BASE inside its engine: '
+                         + ', '.join(sorted(missing)))
+    for spec in args.kind_registry.templates.values():
+        if not spec.template_path.startswith(prefix):
+            raise ValueError(f'kind {spec.kind.id} must live inside engine BASE {owner.path}')
+    replica_parent = args.replica_parent
+    if replica_parent is not None and (
+            not isinstance(replica_parent, td.baseCOMP) or
+            (replica_parent.path != owner.path and not replica_parent.path.startswith(prefix))):
+        raise ValueError('replica_parent must be a BASE inside the engine BASE')
 
 
 def _output_emitter_id(engine_id, instance, channel):
     return f"{engine_id}:output:{instance.get('compElementId')}::{channel}"
 
 
-def _field_schema(refl, sequence, field):
-    """Schema for a sequence field's output channel — WellKnown if one fits, else a Custom
-    (inline-JSON) ref; both lossless, never a lossy Scalar collapse. None if the field is
-    missing (a misconfigured output — surfaces rather than masks)."""
-    pg = next((p for p in refl.sequence.blockParGroups if p.name == f"{sequence}0{field}"), None)
-    return (par_schema.schema_ref(pg) or par_schema.custom_schema_ref(pg)) if pg is not None else None
-
-
-def sequence_manager(ownerComp, *, kind, engine_name, sequence="Sequence", short_id=None,
-                     kind_label=None, wired=None, outputs=None, host=None, length_par=None,
-                     payload="CompElementClipPayload", ordered=True):
-    """Declare a SEQUENCE MANAGER: a comp engine backed by a TD sequence — the whole ceremony
-    in one call.
-
-    Reflects the sequence block's fields to caps (or to wired INPUTS via
-    wired={field: WireInput(...)}); each placed element renders into a block; and a PRODUCER
-    exposes block fields as output channels via outputs={channelId: fieldBase} (bound as
-    own-op-path par references, for cross-op par-to-par). Returns (reflector, engine).
-
-    Defaults: kind_label = kind.title(); host = an rship target named engine_name;
-    short_id = '<engine_name>-engine' (slugged); INSTANCEABLE + ORDERED."""
-    refl = SequenceReflector(ownerComp, sequence, wired=wired, length_par=length_par)
-    outs = dict(outputs or {})
-
-    class _Handler(KindHandler):
-        def on_apply(self, ctx, batch):
-            ordered_batch = refl.render(batch)                 # render caps + wired fields
-            for chan, field in outs.items():                   # producer: expose block fields as outputs
-                for i, ka in enumerate(ordered_batch):
-                    ctx.bind_output(ka.instance, chan,
-                                    f"op({ownerComp.path!r}).par.{sequence}{i}{field}")
-
-        def on_button_pressed(self, instance, button_id, data):
-            refl.fire(instance, button_id)                     # trigger (Pulse field) -> pulse the block par
-
-    builder = (KindDefBuilder(kind, kind_label or kind.title(), payload)
-               .instanceability(Instanceability.INSTANCEABLE)
-               .caps(refl.caps()))
-    if ordered:
-        builder.instance_ordering(InputOrdering.ORDERED)
-    if refl.inputs():
-        builder.inputs(refl.inputs())
-    for t in refl.triggers():
-        builder.trigger(t)
-    for chan, field in outs.items():
-        builder.output_channel(OutputChannelDef(chan, chan.title(),
-                                                _field_schema(refl, sequence, field), "signal"))
-    reg = KindRegistryBuilder().register_with_handler(builder.build(), _Handler()).build()
-
-    if host is None:
-        # op.RSHIP.Api (global) — NOT `import rship`, which only resolves for DATs inside
-        # the rship comp; sequence_manager is called from arbitrary bases.
-        host = op.RSHIP.Api.target(ownerComp, engine_name)
-    engine = comp_engine(ownerComp, CompEngineArgs(
-        short_id=short_id or f"{_engine_slug(engine_name)}-engine",
-        display_name=engine_name, kind_registry=reg, host_target=host))
-    return refl, engine
 
 
 class CompEngineProxy:
@@ -1436,6 +1396,7 @@ class CompEngineProxy:
     # --- publish ---
     def publish(self, online=True, seed=True):
         """Publish the engine target and native required-state declaration."""
+        _validate_engine_layout(self.ownerComp, self.args)
         if self.instance is None:
             return
         eid = self.id

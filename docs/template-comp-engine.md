@@ -2,7 +2,7 @@
 
 Use template kinds when each RShip comp element must become a BASE in a TouchDesigner network. The comp engine copies one template BASE per assigned element and connects those copies with native TouchDesigner wires.
 
-Sequence blocks are a separate materialization model. Template kinds do not use `SequenceReflector` or `sequence_manager()`.
+Every comp engine must be a BASE. Every registered kind must have a template BASE inside that engine, and its generated instances must stay inside the engine too. Registration rejects layouts that violate these rules.
 
 ## Create a template BASE
 
@@ -43,16 +43,14 @@ If the table is absent, the reflector uses the connector description or the In o
 
 ## Register template kinds
 
-Use one `KindRegistryBuilder` for template kinds and code-defined kinds:
+Register the templates contained by the engine BASE:
 
 ```python
 ce = op.RSHIP.CompEngine
 
 registry = (
 	ce.KindRegistryBuilder()
-	.register_children(op('kind_templates'))
-	.register_tagged(op('/project1'), tag='rship-comp-kind')
-	.register_with_handler(code_kind, code_handler)
+	.register_children(me.op('kinds'))
 	.build()
 )
 
@@ -61,19 +59,19 @@ engine = ce.comp_engine(me, ce.CompEngineArgs(
 	display_name='Visual Engine',
 	kind_registry=registry,
 	host_target=op.RSHIP.Api.target(me, 'Visual Engine'),
-	replica_parent=op('instances'),
+	replica_parent=me.op('instances'),
 ))
 ```
 
 `register_children()` reads direct child BASEs. `register_tagged()` reads tagged descendant BASEs. `register_base()` registers one BASE. `register_all()` accepts an explicit iterable of BASEs and `BaseKindSpec` values.
 
-All discovery paths compile to `BaseKindSpec` and then use the existing `KindDef` wire format. A duplicate `Kindid` stops registration.
+All discovery paths compile to `BaseKindSpec` and then use the existing `KindDef` wire format. A duplicate `Kindid` stops registration. Python declarations still need an internal template BASE. A code-only handler cannot bypass this requirement.
 
 For code-owned metadata, build a spec directly:
 
 ```python
 spec = ce.BaseKindSpec.reflect(
-	op('kind_templates/noise'),
+	me.op('kinds/noise'),
 	kind_id='video.noise',
 	ports=[
 		{'direction': 'out', 'id': 'image', 'index': 0,
@@ -92,4 +90,8 @@ The runtime stores the full `compElementId` on each managed copy. The local oper
 
 On a structural update, the runtime creates all required copies before it connects wires. A cap update writes only the matching parameter on the existing copy. Removing an element disconnects its managed inputs, unregisters its output endpoints, and destroys its managed copy.
 
-Native wires work only between operators in the same TouchDesigner process. The runtime rejects a wire when its source endpoint is not local or its connector family differs from the input family.
+The saved demo lives at `/rship_source/comp_engine_demo`. Its `kinds` BASE contains `source` and `layer`, and its `instances` BASE contains generated copies. Call `op('/rship_source/comp_engine_demo').ext.DemoExt.Preview()` to create a local preview with source value 2 and layer gain 3. The layer outputs 6 through a native CHOP wire. RShip assignments replace this preview.
+
+The previous sequence examples are preserved under `/rship_source/legacy_comp_examples` with their extensions disabled. They are no longer registered engines.
+
+Native wires require compatible connectors and a shared TouchDesigner network. The demo puts both generated BASEs under `instances`.

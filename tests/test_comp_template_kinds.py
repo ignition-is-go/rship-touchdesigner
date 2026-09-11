@@ -149,8 +149,32 @@ def port(direction, port_id, index, **extra):
 
 class TemplateKindTests(unittest.TestCase):
     def setUp(self):
+        td_stub.baseCOMP = FakeBase
         if hasattr(COMP.td, '_rship_native_output_ports'):
             COMP.td._rship_native_output_ports.clear()
+
+    def test_engine_requires_base_and_contained_templates(self):
+        owner = FakeBase('/engine')
+        inside = FakeBase('/engine/kinds/source', kind_id='source')
+        outside = FakeBase('/elsewhere/source', kind_id='source')
+        registry = COMP.KindRegistryBuilder().register_base(inside).build()
+        args = COMP.CompEngineArgs('engine', 'Engine', registry,
+                                   replica_parent=FakeBase('/engine/instances'))
+        COMP._validate_engine_layout(owner, args)
+        with self.assertRaisesRegex(ValueError, 'must be a BASE'):
+            COMP._validate_engine_layout(types.SimpleNamespace(OPType='containerCOMP'), args)
+        args.kind_registry = COMP.KindRegistryBuilder().register_base(outside).build()
+        with self.assertRaisesRegex(ValueError, 'must live inside'):
+            COMP._validate_engine_layout(owner, args)
+        args.kind_registry = registry
+        args.replica_parent = FakeBase('/elsewhere')
+        with self.assertRaisesRegex(ValueError, 'replica_parent'):
+            COMP._validate_engine_layout(owner, args)
+        args.replica_parent = None
+        args.kind_registry = COMP.KindRegistryBuilder().register(
+            COMP.KindDefBuilder('code', 'Code', 'CompElementClipPayload').build()).build()
+        with self.assertRaisesRegex(ValueError, 'every comp-engine kind'):
+            COMP._validate_engine_layout(owner, args)
 
     def test_self_describing_base_reflects_controls_and_native_ports(self):
         template = FakeBase(
@@ -203,7 +227,7 @@ class TemplateKindTests(unittest.TestCase):
         COMP.op = lambda path: templates.get(path)
         try:
             engine = types.SimpleNamespace(
-                id='engine', key='/owner:engine', ownerComp=parent,
+                id='engine', key='/owner:engine', ownerComp=FakeBase('/'),
                 args=types.SimpleNamespace(kind_registry=registry, replica_parent=parent),
                 _slots={
                     'source::opaque': {
