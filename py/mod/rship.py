@@ -50,7 +50,7 @@ from exec import CLIENT, Action, Emitter, Instance, Stream, Target, makeWriterRe
 from target import TouchTarget
 from util import (makeEmitterChangeKey, RS_TARGET_ID_STORAGE_KEY, RS_TARGET_INFO_PAGE,
                   RS_BUNDLE_COMPLETE_PAR)
-from par_shape import buildShape, SequenceParShape
+from par_shape import buildShape, SequenceParShape, validate_sequence_payload
 import par_schema
 
 
@@ -410,6 +410,7 @@ def reflect_comp(ownerComp, instance) -> "TargetProxy":
     # fallback; a TargetProxy has monitored_ops(), so we must populate it.)
     root._monitor_ops.add(ownerComp.path)
 
+    allow_properties = "rship-no-properties" not in getattr(ownerComp, "tags", ())
     pages = [p for p in ownerComp.customPages if p.name != RS_TARGET_INFO_PAGE]   # skip util page
     if "Notch" in ownerComp.pages:
         pages.append(ownerComp.pages["Notch"])
@@ -429,8 +430,15 @@ def reflect_comp(ownerComp, instance) -> "TargetProxy":
                 seen_seq.add(seq.name)
                 seqPgs = [p for p in page.parGroups if getattr(p, "sequence", None) and p.sequence.name == seq.name]
                 try:
-                    sshape = SequenceParShape(ownerComp, pg, sequenceParGroups=seqPgs)
+                    sshape = SequenceParShape(
+                        ownerComp,
+                        pg,
+                        sequenceParGroups=seqPgs,
+                        stateOnly=True,
+                    )
                     sschema = sshape.buildSchemaProperties()
+                    if not sschema["items"]["properties"]:
+                        continue
                 except Exception as e:
                     op.RS_LOG.Warning(f"[reflect_comp]: skipping sequence {seq.name}: {e}")
                     continue
@@ -445,8 +453,13 @@ def reflect_comp(ownerComp, instance) -> "TargetProxy":
                     _s.setData(d)
                     CLIENT.pulseEmitter(_eid, _to_jsonable(_s.buildData()))   # sequence parexec is unreliable
                     return None
-                sqNode._actions.append(_Reg(f"Set {seq.name}", "set", sschema,
-                                            handler=_seqset, writesTo=makeWriterRef(eid)))
+                sqNode._actions.append(_Reg(
+                    f"Set {seq.name}",
+                    "set",
+                    sschema,
+                    handler=_seqset,
+                    writesTo=makeWriterRef(eid) if allow_properties else None,
+                ))
                 pageNode._children.append(sqNode)
                 continue
             try:                                                 # par group -> property
@@ -460,10 +473,17 @@ def reflect_comp(ownerComp, instance) -> "TargetProxy":
             pgNode._emitters["updated"] = _Reg(
                 pg.name, "updated", schema,
                 change_key=makeEmitterChangeKey(ownerComp, pg.name), provider=shape.buildData)
+            def _set_par(a, d, _s=shape, _eid=f"{uid}:{pg.name}:updated"):
+                _s.setData(d)
+                if allow_properties:
+                    CLIENT.pulseEmitter(_eid, _to_jsonable(_s.buildData()))
+                return None
+
             pgNode._actions.append(_Reg(
                 f"Set {pg.name}", "set", schema,
-                handler=(lambda a, d, _s=shape: _s.setData(d)),
-                writesTo=makeWriterRef(f"{uid}:{pg.name}:updated")))
+                handler=_set_par,
+                writesTo=(makeWriterRef(f"{uid}:{pg.name}:updated")
+                          if allow_properties else None)))
             pageNode._children.append(pgNode)
         # page-level bulk_set (this page's pars)
         pageNode._actions.append(_bulk_reg(_bulk_entries(page, ownerComp), [page], ownerComp))
@@ -703,23 +723,34 @@ class TargetProxy(TouchTarget):
         short = short_id or _slug(seq.name)
         self._monitor_ops.add(owner.path)
         prefix = f"{seq.name}0"
-        fields = [pg.name[len(prefix):] for pg in seq.blockParGroups if pg.name.startswith(prefix)]
+        fields = [
+            pg.name[len(prefix):]
+            for pg in seq.blockParGroups
+            if pg.name.startswith(prefix) and not par_schema.is_trigger(pg)
+        ]
 
         def block_pg(i, field):
             return owner.parGroup[f"{seq.name}{i}{field}"]
 
         item_props = {f: par_schema.inline_schema(block_pg(0, f))
                       for f in fields if block_pg(0, f) is not None}
-        schema = {"type": "array", "items": {"type": "object", "properties": item_props}}
+        schema = {
+            "type": "array",
+            "items": {"type": "object", "properties": item_props},
+            "minItems": 1,
+        }
+        maximum = getattr(seq, "maxBlocks", None)
+        if maximum is not None:
+            schema["maxItems"] = maximum
 
         def read_blocks():
             return [{f: par_schema.read(block_pg(i, f)) for f in fields if block_pg(i, f) is not None}
                     for i in range(seq.numBlocks)]
 
         def writer(action, data, _short=short):
-            if not isinstance(data, list):
-                return None
-            seq.numBlocks = len(data)
+            validate_sequence_payload(data, seq, persistent=True)
+            if seq.numBlocks != len(data):
+                seq.numBlocks = len(data)
             for i, bd in enumerate(data):
                 if isinstance(bd, dict):
                     for f in fields:

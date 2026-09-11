@@ -919,11 +919,8 @@ class CompEngineProxy:
             CLIENT.setTargetStatus(self.id, self.instance.id, Status.Offline)
 
     # --- publish (ordered stand-up sequence; order matters) ---
-    def publish(self):
-        """Stand the engine up on the server in the exact order the SDK requires:
-        target -> reserved EMITTERS -> reserved ACTIONS (apply writes committed_state)
-        -> CompEngine entity -> initial committed_state pulse. Idempotent: re-publishing
-        on reconnect re-sends and re-pulses the last committed state (cold-start gate)."""
+    def publish(self, online=True, seed=True):
+        """Publish the engine definitions, with readiness and seeding optionally delayed."""
         if self.instance is None:
             return
         eid = self.id
@@ -939,7 +936,8 @@ class CompEngineProxy:
         if host_id:
             engine_target.managed = True
         CLIENT.set(engine_target)
-        CLIENT.setTargetStatus(eid, self.instance.id, Status.Online)
+        if online:
+            CLIENT.setTargetStatus(eid, self.instance.id, Status.Online)
         # 2. reserved EMITTERS first (committed_state must exist before the apply action)
         self._register_emitter(self._rid("prep_report"), "Prep Report", provider=(lambda: None))
         self._register_emitter(self._rid("committed_state"), "Committed State",
@@ -953,11 +951,9 @@ class CompEngineProxy:
         # 4. the CompEngine entity (server maps verbs -> ids via its named fields)
         CLIENT.sendEvent(CLIENT.buildSetEvent(self._engine_entity(), itemType="CompEngine"))
         # 5. initial committed_state baseline (empty on first stand-up; last committed on reconnect)
-        CLIENT.pulseEmitter(self._rid("committed_state"), self._committed)
-        # 6. re-register per-instance readback providers. RshipExt.sendProjectData calls
-        # clearEmitterValueProviders() before each publish, which wipes the cap/presence/
-        # output providers registered during apply; restore them from the readback cache
-        # so seedProperties force-re-pulses every per-instance readback on reconnect.
+        if seed:
+            CLIENT.pulseEmitter(self._rid("committed_state"), self._committed)
+        # Re-register per-instance readback providers from the engine-owned cache.
         # (Inbound SetCap handlers live in CLIENT.handlers, which is never cleared.)
         for emitter_id in list(self._readback_last.keys()):
             CLIENT.saveEmitterValueProvider(emitter_id,

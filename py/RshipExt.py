@@ -20,10 +20,10 @@ import TDFunctions as TDF
 import socket
 import json
 
-from exec import CLIENT, Instance, InstanceStatus, Status, Action, Emitter
+from exec import CLIENT, Instance, InstanceStatus, Status, Action, Emitter, Pulse
 from target import TouchTarget
 from util import makeEmitterChangeKey
-from connection import ConnectionManager, ConnState
+from connection import ConnectionManager, ConnState, RegistrationCoordinator
 import rship
 import comp_engine
 
@@ -45,6 +45,7 @@ class ExecInfo:
 # region RshipExt
 
 class RshipExt:
+	DRAIN_RUN_SOURCE = "args[0]._drainRegistrationCommands()"
 	STATS_PAGE = 'Rship Sync Stats'
 	LOCAL_TARGETS_PAR = 'Localtargets'
 	LOCAL_ACTIONS_PAR = 'Localactions'
@@ -99,8 +100,15 @@ class RshipExt:
 
 		self.instance: Instance | None = None
 
-		self.emitterIndex: Dict[str, Emitter] = {}
+		self.emitterIndex: Dict[str, list] = {}
 		self.emitterHandlers: Dict[str, Callable] = {}
+		self._registeredActionIds = set()
+		self._registeredProviderIds = set()
+		self._publishedTargetIds = set()
+		self._pendingPulseEvents = {}
+		self._pendingExplicitPulses = []
+		self._drainRun = None
+		self.registration = RegistrationCoordinator(reject=CLIENT.sendCommandError)
 
 		self.reconnectTimerOp = self.ownerComp.op('reconnect_timer')
 
@@ -198,14 +206,13 @@ class RshipExt:
 		values so the server has fresh reconciliation ground-truth."""
 		CLIENT.setSend(self.websocketOp.sendText)
 		op.RS_LOG.Info("[RshipExt]: Connected to Rship Server at " + str(self.websocketOp.par.netaddress.eval()))
-		self.refreshProjectData()
-		self.seedProperties()
+		self.registration.socket_opened()
+		self._attemptRegistration()
 
 	def seedProperties(self):
-		"""Pulse every property emitter's current value. This is the property seed
-		(reconciliation ground-truth), run on every (re)connect. Distinct from the
-		retired 'send all emitter values' flag; the server can also pull individual
-		values on demand via the inbound ResendEmitterValue command."""
+		"""Pulse every registered property value outside the registration cycle."""
+		if not self.registration.is_active:
+			return
 		CLIENT.setSend(self.websocketOp.sendText)
 		CLIENT.seedEmitterValues()
 
@@ -218,7 +225,8 @@ class RshipExt:
 		"""Ensure the local Instance object exists. Returns True if we have identity."""
 		if self._machineId is None:
 			return False
-		if self.instance is None:
+		expectedId = self._machineId + ":" + self.makeServiceId()
+		if self.instance is None or self.instance.id != expectedId:
 			self._createInstance()
 		return True
 
@@ -234,7 +242,7 @@ class RshipExt:
 			name=serviceId,
 			serviceId=serviceId,
 			serviceTypeCode="touchdesigner",
-			status=InstanceStatus.Available,
+			status=InstanceStatus.Starting,
 			machineId=self._machineId,
 			color="#727e51"
 		)
@@ -250,7 +258,6 @@ class RshipExt:
 
 	def OnProjectPreSave(self):
 		# Always rescan and update local cache, refresh identity from the link.
-		self.cookTargetList()
 		self.updateExecInfo()
 		# Push if we can; if not connected, refreshProjectData -> reconcile drives reconnect.
 		if self._ensureInstance():
@@ -262,6 +269,12 @@ class RshipExt:
 		self.conn.noteSocketOpen()
 
 	def OnRshipDisconnect(self):
+		self.registration.socket_closed()
+		self._pendingPulseEvents.clear()
+		self._pendingExplicitPulses.clear()
+		if self._drainRun is not None:
+			self._drainRun.kill()
+			self._drainRun = None
 		self.sentTargetStatuses.clear()
 		self.updateStatsPage(remoteTargets=0, remoteActions=0, remoteEmitters=0)
 		self.conn.noteSocketClosed()
@@ -273,6 +286,8 @@ class RshipExt:
 	def OnRshipReceiveText(self, text: str):
 		CLIENT.setSend(self.websocketOp.sendText)
 		self.conn.noteBeat()
+		if self.registration.defer_if_loading(text):
+			return
 		CLIENT.parseMessage(text)
 
 	# --- reconnect_timer (~1Hz) ---
@@ -283,12 +298,13 @@ class RshipExt:
 		# reconnect.
 		self.updateExecInfo()
 		self.conn.tick()
+		if self.registration.retry_due():
+			self._attemptRegistration()
 
 		# Pick up Python targets registered after connect (e.g. late extension init).
 		if self.conn.isConnected and rship.consume_dirty():
 			op.RS_LOG.Debug("[RshipExt]: rship registry changed, re-publishing")
 			self.refreshProjectData()
-			self.seedProperties()
 
 	# --- resend_all par ---
 
@@ -297,10 +313,8 @@ class RshipExt:
 		network, and push every target/action/emitter plus current values."""
 		op.RS_LOG.Info("[RshipExt]: >>> ResendAll requested")
 		self.sentTargetStatuses.clear()
-		self.cookTargetList()
 		if self._ensureInstance() and self.conn.isConnected:
 			self.refreshProjectData()
-			self.seedProperties()
 		else:
 			op.RS_LOG.Warning("[RshipExt]: ResendAll while not connected - reconnecting")
 			self.conn.reconcile()
@@ -434,15 +448,51 @@ class RshipExt:
 			op.RS_LOG.Warning("[RshipExt]: No machine id yet, skipping refresh")
 			return
 
-		self.buildTargets()
-
 		if self.conn.isConnected:
-			self.sendProjectData()
+			self.registration.begin_refresh()
+			self._attemptRegistration()
 		else:
 			op.RS_LOG.Warning("[RshipExt]: Not connected to Rship Server, will reconnect")
 			self.conn.reconcile()
 
 		op.RS_LOG.Info("[RshipExt]: <<< refreshProjectData complete")
+
+	def _attemptRegistration(self):
+		if not self.conn.isConnected or not self._ensureInstance():
+			return
+		generation = self.registration.generation
+		try:
+			self.instance.status = InstanceStatus.Starting.value
+			self._sendRegistrationEvents([CLIENT.buildSetEvent(self.instance)], generation)
+			self.cookTargetList()
+			self.buildTargets()
+			self.sendProjectData(generation)
+		except Exception as error:
+			op.RS_LOG.Error(f"[RshipExt]: Registration failed: {error}")
+			self.sentTargetStatuses.clear()
+			self.registration.registration_failed(generation)
+			return
+
+		if self.registration.registration_succeeded(generation):
+			self._flushPendingPulses()
+			self._drainRegistrationCommands()
+
+	def _sendRegistrationEvents(self, events, generation):
+		if not self.conn.isConnected or not self.registration.is_current(generation):
+			raise RuntimeError("Connection changed during registration")
+		CLIENT.sendEventBatch(events)
+		if not self.conn.isConnected or not self.registration.is_current(generation):
+			raise RuntimeError("Connection changed during registration")
+
+	def _drainRegistrationCommands(self):
+		self._drainRun = None
+		try:
+			pending = self.registration.drain(CLIENT.parseMessage)
+		except Exception as error:
+			op.RS_LOG.Error(f"[RshipExt]: Deferred command failed: {error}")
+			pending = self.registration.queued_count > 0
+		if pending and self.conn.isConnected:
+			self._drainRun = run(self.DRAIN_RUN_SOURCE, self, delayFrames=1)
 
 
 	def cookTargetList(self):
@@ -459,6 +509,7 @@ class RshipExt:
 		# op.RS_LOG.Info("[RshipExt]: Found", len(ops), "ops")
 
 		foundOps: Dict[str, TouchTarget] = {}
+		self._pendingOfflineTargetIds = set()
 
 		# Reflect each tagged COMP through the consolidated rship.reflect_comp — one function
 		# that replaced the old OPTarget/PageTarget/ParGroupTarget/SequenceTarget classes. Ids
@@ -486,6 +537,8 @@ class RshipExt:
 				op.RS_LOG.Info("[RshipExt]: skip tag-reflect (comp-engine-managed) ->", o.path)
 				continue
 			opTarget = rship.reflect_comp(o, self.instance)
+			if opTarget.id in foundOps:
+				raise ValueError(f"Duplicate Rship target id: {opTarget.id}")
 			foundOps[opTarget.id] = opTarget
 
 		self.opTargets = foundOps
@@ -497,10 +550,12 @@ class RshipExt:
 		# target OFFLINE and drop it, so it isn't re-published as online on connect.
 		for proxy in rship.prune_dead():
 			proxy.instance = self.instance
-			CLIENT.setTargetOffline(proxy.id, self.instance.id)
+			self._pendingOfflineTargetIds.add(proxy.id)
 			op.RS_LOG.Info("[RshipExt]: removed target (base deleted) ->", proxy.id, "offline")
 		for proxy in rship.get_targets():
 			proxy.instance = self.instance
+			if proxy.id in self.opTargets:
+				raise ValueError(f"Duplicate Rship target id: {proxy.id}")
 			self.opTargets[proxy.id] = proxy
 
 		# Drive the parexec's monitored ops: every tag-based target COMP plus every op backing
@@ -528,39 +583,38 @@ class RshipExt:
 		allTouchTargets = [child for target in self.opTargets.values() for child in target.collectChildren()]
 
 		# Track previously known targets
-		previousTargets = set(self.allTouchTargets.keys())
+		previousTargets = set(self._publishedTargetIds)
 
-		self.allTouchTargets = {target.id: target for target in allTouchTargets}
+		indexedTargets = {}
+		for target in allTouchTargets:
+			if target.id in indexedTargets:
+				raise ValueError(f"Duplicate Rship target id: {target.id}")
+			indexedTargets[target.id] = target
+		self.allTouchTargets = indexedTargets
 
 		# Find targets that were removed locally
 		currentTargets = set(self.allTouchTargets.keys())
 		removedTargets = previousTargets - currentTargets
 
-		# Mark removed targets as offline if we're connected
-		if self.conn.isConnected and self.instance:
-			for targetId in removedTargets:
-				op.RS_LOG.Debug(f"[RshipExt]: Target {targetId} removed locally, setting offline")
-				if targetId not in self.sentTargetStatuses or self.sentTargetStatuses[targetId] != Status.Offline:
-					CLIENT.setTargetOffline(targetId, self.instance.id)
-					self.sentTargetStatuses[targetId] = Status.Offline
+		self._pendingOfflineTargetIds.update(removedTargets)
 
 
 # endregion Project Management
 
 # region ws senders
 
-	def sendProjectData(self):
+	def sendProjectData(self, generation):
 		if self.instance is None:
-			op.RS_LOG.Error("[RshipExt]: Instance is not set, cannot send project data")
-			return
+			raise RuntimeError("Instance is not configured")
 
 		CLIENT.setSend(self.websocketOp.sendText)
-		events = [CLIENT.buildSetEvent(self.instance)]
+		CLIENT.instanceId = self.instance.id
+		definitionEvents = []
 
 		for opTarget in self.opTargets.values():
 			streamInfo = opTarget.getStreamInfo()
 			if streamInfo is not None:
-				events.append(CLIENT.buildSetEvent(streamInfo))
+				definitionEvents.append(CLIENT.buildSetEvent(streamInfo))
 
 		allTouchTargets = [child for target in self.opTargets.values() for child in target.collectChildren()]
 
@@ -568,10 +622,29 @@ class RshipExt:
 		allActions = [action for target in allTouchTargets for action in target.getActions()]
 		allEmitters = [emitter for target in allTouchTargets for emitter in target.getEmitters()]
 
-		self.allTouchTargets = {target.id: target for target in allTouchTargets}
-		self.emitterIndex.clear()
-		self.emitterHandlers.clear()
-		CLIENT.clearEmitterValueProviders()
+		actionIds = [action.id for action in allActions]
+		emitterIds = [emitter.id for emitter in allEmitters]
+		if len(actionIds) != len(set(actionIds)):
+			raise ValueError("Duplicate Rship action id")
+		if len(emitterIds) != len(set(emitterIds)):
+			raise ValueError("Duplicate Rship emitter id")
+		propertyEmitterIds = {
+			action.writesTo["emitterId"]
+			for action in allActions
+			if hasattr(action, "writesTo")
+		}
+		missingEmitters = propertyEmitterIds - set(emitterIds)
+		if missingEmitters:
+			raise ValueError(f"Property writers have no emitter: {sorted(missingEmitters)}")
+
+		for actionId in self._registeredActionIds - set(actionIds):
+			CLIENT.actions.pop(actionId, None)
+			CLIENT.handlers.pop(actionId, None)
+		for emitterId in self._registeredProviderIds:
+			CLIENT.emitterValueProviders.pop(emitterId, None)
+
+		self.emitterIndex = {}
+		self.emitterHandlers = {}
 
 		op.RS_LOG.Info(f"[RshipExt]: Sending {len(allTargets)} targets, {len(allActions)} actions, {len(allEmitters)} emitters")
 		self.updateStatsPage(
@@ -580,80 +653,125 @@ class RshipExt:
 			localEmitters=len(allEmitters),
 		)
 
-		statusesToSend = 0
 		for target in allTargets:
-			events.append(CLIENT.buildSetEvent(target))
+			definitionEvents.append(CLIENT.buildSetEvent(target))
 
-			# Only send status if it's changed or never been sent
-			if target.id not in self.sentTargetStatuses or self.sentTargetStatuses[target.id] != Status.Online:
-				events.append(CLIENT.buildTargetStatusEvent(target.id, self.instance.id, Status.Online))
-				self.sentTargetStatuses[target.id] = Status.Online
-				statusesToSend += 1
-
-		op.RS_LOG.Info(f"[RshipExt]: Sent {statusesToSend} target status updates (Online)")
-
+		actionDefinitionEvents = []
 		for action in allActions:
-			CLIENT.saveHandler(action.id, action.handler)
-
-			del action.handler  # Remove handler from action to avoid circular references
+			handler = action.handler
+			CLIENT.saveHandler(action.id, handler)
+			del action.handler
 			CLIENT.actions[action.id] = action
-			events.append(CLIENT.buildSetEvent(action))
+			actionDefinitionEvents.append(CLIENT.buildSetEvent(action))
 
 		for emitter in allEmitters:
+			handler = emitter.handler
 			changeKeys = getattr(emitter, 'changeKeys', [emitter.changeKey])
 			for changeKey in changeKeys:
-				self.emitterIndex[changeKey] = emitter
-				self.emitterHandlers[changeKey] = emitter.handler
+				self.emitterIndex.setdefault(changeKey, []).append(emitter)
+			self.emitterHandlers[emitter.id] = handler
 
 			# Register the value provider by emitter id for property seeding and
 			# server-driven ResendEmitterValue.
-			CLIENT.saveEmitterValueProvider(emitter.id, emitter.handler)
+			if emitter.id in propertyEmitterIds:
+				CLIENT.saveEmitterValueProvider(emitter.id, handler)
 
 			del emitter.handler  # Remove handler from emitter to avoid circular references
 			del emitter.changeKey
 			if hasattr(emitter, 'changeKeys'):
 				del emitter.changeKeys
-			events.append(CLIENT.buildSetEvent(emitter))
+			definitionEvents.append(CLIENT.buildSetEvent(emitter))
+		definitionEvents.extend(actionDefinitionEvents)
 
-		CLIENT.sendEventBatch(events)
+		self._registeredActionIds = set(actionIds)
+		self._registeredProviderIds = set(propertyEmitterIds)
+		self._sendRegistrationEvents(definitionEvents, generation)
 
 		# Stand up opt-in comp engines via their ordered publish sequence (target ->
 		# emitters -> actions -> CompEngine entity -> initial pulse) — not part of the
 		# generic target batch above. First mark engines whose base was deleted offline.
-		for dead in comp_engine.prune_dead_engines():
+		deadEngines = list(comp_engine.prune_dead_engines())
+		for dead in deadEngines:
 			dead.instance = self.instance
-			dead.offline()
+			prefix = dead.id + ":"
+			for actionId in [key for key in CLIENT.actions if key.startswith(prefix)]:
+				CLIENT.actions.pop(actionId, None)
+				CLIENT.handlers.pop(actionId, None)
+			for emitterId in [key for key in CLIENT.emitterValueProviders if key.startswith(prefix)]:
+				CLIENT.emitterValueProviders.pop(emitterId, None)
 			op.RS_LOG.Info("[RshipExt]: removed comp engine (base deleted) ->", dead.id, "offline")
-		for engine in comp_engine.get_engines():
+		engines = list(comp_engine.get_engines())
+		for engine in engines:
 			engine.instance = self.instance
-			engine.publish()
+			engine.publish(online=False, seed=False)
+			if not self.conn.isConnected or not self.registration.is_current(generation):
+				raise RuntimeError("Connection changed during comp-engine registration")
 
-		# Property seeding (pulsing current values) is now an explicit step done by
-		# the caller via seedProperties(), not a flag on this send path.
+		seedEvents = []
+		for emitterId, provider in tuple(CLIENT.emitterValueProviders.items()):
+			data = provider()
+			if data is not None:
+				seedEvents.append(CLIENT.buildSetEvent(Pulse(
+					id=emitterId,
+					emitterId=emitterId,
+					data=data,
+				)))
+		self._sendRegistrationEvents(seedEvents, generation)
+
+		statusEvents = []
+		for targetId in sorted(self._pendingOfflineTargetIds):
+			statusEvents.append(CLIENT.buildTargetStatusEvent(targetId, self.instance.id, Status.Offline))
+		for dead in deadEngines:
+			statusEvents.append(CLIENT.buildTargetStatusEvent(dead.id, self.instance.id, Status.Offline))
+		for target in allTargets:
+			statusEvents.append(CLIENT.buildTargetStatusEvent(target.id, self.instance.id, Status.Online))
+		for engine in engines:
+			statusEvents.append(CLIENT.buildTargetStatusEvent(engine.id, self.instance.id, Status.Online))
+		self._sendRegistrationEvents(statusEvents, generation)
+
+		self.instance.status = InstanceStatus.Available.value
+		self._sendRegistrationEvents([CLIENT.buildSetEvent(self.instance)], generation)
+		self.sentTargetStatuses = {target.id: Status.Online for target in allTargets}
+		self.sentTargetStatuses.update({engine.id: Status.Online for engine in engines})
+		self.sentTargetStatuses.update({targetId: Status.Offline for targetId in self._pendingOfflineTargetIds})
+		self._publishedTargetIds = {target.id for target in allTargets}
 
 
-	def PulseEmitter(self, opPath: str, parName: str):
+	def PulseEmitter(self, opPath: str, parName: str, preserveDuplicate: bool = False):
 		CLIENT.setSend(self.websocketOp.sendText)
 		changeKey = makeEmitterChangeKey(opPath, parName)
 
-		emitter = self.emitterIndex.get(changeKey, None)
-		if emitter is None:
+		emitters = self.emitterIndex.get(changeKey, ())
+		if not emitters:
 			op.RS_LOG.Debug(f"[RshipExt]: No emitter found for change key {changeKey}")
 			return
 
-		handler = self.emitterHandlers.get(changeKey, None)
+		events = []
+		for emitter in emitters:
+			handler = self.emitterHandlers.get(emitter.id)
+			if handler is None:
+				continue
+			data = handler()
+			if data is None:
+				continue
+			event = CLIENT.buildSetEvent(Pulse(id=emitter.id, emitterId=emitter.id, data=data))
+			if self.registration.is_active:
+				events.append(event)
+			elif preserveDuplicate and emitter.id not in self._registeredProviderIds:
+				self._pendingExplicitPulses.append(event)
+			else:
+				self._pendingPulseEvents[emitter.id] = event
+		if events:
+			CLIENT.sendEventBatch(events)
 
-		if handler is None:
-			op.RS_LOG.Debug(f"[RshipExt]: No handler found for emitter {changeKey}")
+	def _flushPendingPulses(self):
+		if not self.registration.is_active:
 			return
-
-		data = handler()
-
-		if data is None:
-			op.RS_LOG.Debug(f"[RshipExt]: No data returned from emitter handler for {changeKey}")
-			return
-
-		CLIENT.pulseEmitter(emitter.id, data)
+		events = list(self._pendingPulseEvents.values()) + self._pendingExplicitPulses
+		self._pendingPulseEvents.clear()
+		self._pendingExplicitPulses.clear()
+		if events:
+			CLIENT.sendEventBatch(events)
 
 	def makeServiceId(self):
 

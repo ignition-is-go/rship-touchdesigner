@@ -4,6 +4,24 @@ from typing import Dict, List
 from td import OP, ParGroup
 
 
+def validate_sequence_payload(data, sequence, persistent=False):
+    """Validate a sequence payload before TouchDesigner can resize or write it."""
+    if not isinstance(data, list):
+        raise ValueError("Sequence data must be an array")
+    for block_index, block_data in enumerate(data):
+        if not isinstance(block_data, dict):
+            raise ValueError(f"Sequence block {block_index} must be an object")
+    if persistent:
+        if not data:
+            raise ValueError("Sequence state must contain at least one block")
+        maximum = getattr(sequence, "maxBlocks", None)
+        if maximum is not None and len(data) > maximum:
+            raise ValueError(
+                f"Sequence state exceeds TouchDesigner's maximum of {maximum} blocks"
+            )
+    return data
+
+
 class ParShape(ABC):
     @abstractmethod
     def buildData(self) -> Dict[str, any]:
@@ -527,10 +545,17 @@ def buildShape(ownerComp: OP, parGroup: ParGroup) -> ParShape:
 
 
 class SequenceParShape(ParShape):
-    def __init__(self, ownerComp: OP, parGroup: ParGroup, sequenceParGroups: List[ParGroup] | None = None):
+    def __init__(
+        self,
+        ownerComp: OP,
+        parGroup: ParGroup,
+        sequenceParGroups: List[ParGroup] | None = None,
+        stateOnly: bool = False,
+    ):
         self.parGroup = parGroup
         self.ownerComp = ownerComp
         self.sequenceParGroups = sequenceParGroups or [parGroup]
+        self.stateOnly = stateOnly
 
     def _getSchemaParGroups(self) -> List[ParGroup]:
         schemaParGroups = []
@@ -610,7 +635,15 @@ class SequenceParShape(ParShape):
         for block in sequence.blocks:
             blockItem = {}
             for blockParGroup in block:
-                blockShape = buildShape(self.ownerComp, blockParGroup)
+                if self.stateOnly and blockParGroup.style in ("Pulse", "Momentary"):
+                    continue
+                try:
+                    blockShape = buildShape(self.ownerComp, blockParGroup)
+                except ValueError as error:
+                    op.RS_LOG.Debug(
+                        f"[SequenceParShape]: Skipping par '{blockParGroup.name}' in buildData: {error}"
+                    )
+                    continue
                 blockItem[self._getSequenceMemberKey(blockParGroup)] = self._unwrapSequenceMemberData(
                     blockShape.buildData()
                 )
@@ -623,6 +656,8 @@ class SequenceParShape(ParShape):
         seenParGroups = set()
 
         for blockParGroup in self._getSchemaParGroups():
+            if self.stateOnly and blockParGroup.style in ("Pulse", "Momentary"):
+                continue
             memberKey = self._getSequenceMemberKey(blockParGroup)
             if memberKey in seenParGroups:
                 continue
@@ -632,30 +667,35 @@ class SequenceParShape(ParShape):
                 blockShape.buildSchemaProperties()
             )
 
-        return {
+        schema = {
             "type": "array",
             "items": {
                 "type": "object",
                 "properties": itemProperties,
             },
         }
+        if self.stateOnly:
+            schema["minItems"] = 1
+            maximum = getattr(self.parGroup.sequence, "maxBlocks", None)
+            if maximum is not None:
+                schema["maxItems"] = maximum
+        return schema
 
     def setData(self, data: List[Dict[str, any]]):
         sequence = self.parGroup.sequence
         if sequence is None:
             return
 
-        if not isinstance(data, list):
-            raise ValueError("Sequence data must be an array")
+        validate_sequence_payload(data, sequence, persistent=self.stateOnly)
 
-        sequence.numBlocks = len(data)
+        if sequence.numBlocks != len(data):
+            sequence.numBlocks = len(data)
 
         for blockIndex, blockData in enumerate(data):
-            if not isinstance(blockData, dict):
-                raise ValueError(f"Sequence block {blockIndex} must be an object")
-
             block = sequence.blocks[blockIndex]
             for blockParGroup in block:
+                if self.stateOnly and blockParGroup.style in ("Pulse", "Momentary"):
+                    continue
                 blockValue = blockData.get(self._getSequenceMemberKey(blockParGroup), None)
                 if blockValue is None:
                     continue

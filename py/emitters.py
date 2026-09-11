@@ -35,7 +35,11 @@ def onValuesChanged(changes):
 	return
 
 def onPulse(par):
-	me.ext.RshipExt.PulseEmitter(par.owner, _getEmitterParGroupName(par.parGroup))
+	me.ext.RshipExt.PulseEmitter(
+		par.owner,
+		_getEmitterParGroupName(par.parGroup),
+		preserveDuplicate=True,
+	)
 	return
 
 def onExpressionChange(par, val, prev):
