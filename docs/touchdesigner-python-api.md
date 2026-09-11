@@ -240,8 +240,8 @@ per-frame, `rand(me)` for per-op), `tryExcept(fn, fallback)`; `legalName/validNa
 
 ## 10. Relevance to rship-touchdesigner / comp-engine
 
-- **Caps = Properties on the value plane** (SetCap action + cap readback emitter), driven by
-  TD's parameter machinery. **committed_state/topology = the apply plane.**
+- **Caps and presence arrive as native required-state rows.** Their deltas use the targeted
+  value callback; Element-row changes are the topology plane.
 - **Wire-routing / comp-mixer (next step):** a producer exposes its output as a TD-evaluable
   reference; the consumer's wired par binds via `par.expr` (EXPRESSION mode) so the **TD cook
   engine handles per-frame updates** instead of Python re-projecting every tick. Python re-binds

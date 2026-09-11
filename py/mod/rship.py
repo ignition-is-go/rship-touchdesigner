@@ -54,6 +54,86 @@ from par_shape import buildShape, SequenceParShape, validate_sequence_payload
 import par_schema
 
 
+@dataclasses.dataclass
+class PropertyBinding:
+    emitterId: str
+    targetId: str
+    schema: dict
+    read: typing.Callable[[], typing.Any]
+    write: typing.Callable[[typing.Any], typing.Any]
+
+
+class ReconciledPropertyController:
+    """Applies elected rows through the property's canonical local setter."""
+    MAX_ATTEMPTS = 3
+
+    def __init__(self):
+        self.bindings = {}
+        self.view = None
+        self.engaged = {}
+        self.exhausted = set()
+
+    def replace_bindings(self, bindings):
+        self.bindings = dict(bindings)
+        self.engaged = {k: v for k, v in self.engaged.items() if k in self.bindings}
+        self.exhausted.intersection_update(self.bindings)
+
+    def view_changed(self, view, change):
+        self.view = view
+        if not view.ready:
+            return
+        desired_ids = set(view.rows)
+        for emitter_id in list(self.engaged):
+            if emitter_id not in desired_ids:
+                self.engaged.pop(emitter_id, None)
+                self.exhausted.discard(emitter_id)
+        for emitter_id in desired_ids:
+            self._reconcile(emitter_id, force=change.reset or emitter_id in change.upsertedIds)
+
+    def observation_changed(self, emitter_id):
+        if self.view is not None and self.view.ready and emitter_id in self.view.rows:
+            self.exhausted.discard(emitter_id)
+            self._reconcile(emitter_id)
+
+    def _reconcile(self, emitter_id, force=False):
+        row = self.view.rows.get(emitter_id) if self.view is not None else None
+        binding = self.bindings.get(emitter_id)
+        if row is None or binding is None or emitter_id in self.exhausted:
+            return
+        if row.get('id') != emitter_id or row.get('emitterId') != emitter_id:
+            op.RS_LOG.Warning(f'[rship]: invalid reconciled property id {emitter_id}')
+            return
+        if row.get('targetId') != binding.targetId or row.get('schema') != binding.schema:
+            op.RS_LOG.Warning(f'[rship]: reconciled property definition mismatch for {emitter_id}')
+            return
+        desired = row.get('value')
+        if emitter_id in self.engaged and _values_equivalent(binding.read(), desired):
+            self.engaged[emitter_id] = desired
+            return
+        for _ in range(self.MAX_ATTEMPTS):
+            binding.write(desired)
+            if _values_equivalent(binding.read(), desired):
+                self.engaged[emitter_id] = desired
+                self.exhausted.discard(emitter_id)
+                return
+        self.exhausted.add(emitter_id)
+        op.RS_LOG.Warning(f'[rship]: elected property did not converge: {emitter_id}')
+
+
+def _values_equivalent(a, b):
+    if a is b:
+        return True
+    if isinstance(a, bool) or isinstance(b, bool):
+        return a == b
+    if isinstance(a, (int, float)) and isinstance(b, (int, float)):
+        return float(a) == float(b)
+    if isinstance(a, dict) and isinstance(b, dict):
+        return a.keys() == b.keys() and all(_values_equivalent(a[k], b[k]) for k in a)
+    if isinstance(a, (list, tuple)) and isinstance(b, (list, tuple)):
+        return len(a) == len(b) and all(_values_equivalent(x, y) for x, y in zip(a, b))
+    return a == b
+
+
 # region WriteOutcome
 
 class WriteOutcome:

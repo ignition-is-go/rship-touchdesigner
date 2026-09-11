@@ -109,6 +109,9 @@ class RshipExt:
 		self._pendingExplicitPulses = []
 		self._drainRun = None
 		self.registration = RegistrationCoordinator(reject=CLIENT.sendCommandError)
+		self.propertyController = rship.ReconciledPropertyController()
+		self.propertyView = None
+		self.compView = None
 
 		self.reconnectTimerOp = self.ownerComp.op('reconnect_timer')
 
@@ -269,6 +272,7 @@ class RshipExt:
 		self.conn.noteSocketOpen()
 
 	def OnRshipDisconnect(self):
+		CLIENT.disconnectViews()
 		self.registration.socket_closed()
 		self._pendingPulseEvents.clear()
 		self._pendingExplicitPulses.clear()
@@ -422,7 +426,6 @@ class RshipExt:
 					port = defaultPort
 
 			rshipUrl = f"{protocol}://{host}" if protocol else host
-
 			if self._rshipUrl != rshipUrl or self._rshipPort != port:
 				self._rshipUrl = rshipUrl
 				self._rshipPort = port
@@ -636,6 +639,22 @@ class RshipExt:
 		missingEmitters = propertyEmitterIds - set(emitterIds)
 		if missingEmitters:
 			raise ValueError(f"Property writers have no emitter: {sorted(missingEmitters)}")
+		emittersById = {emitter.id: emitter for emitter in allEmitters}
+		propertyBindings = {}
+		for action in allActions:
+			if not hasattr(action, 'writesTo'):
+				continue
+			emitterId = action.writesTo['emitterId']
+			emitter = emittersById[emitterId]
+			actionHandler = action.handler
+			emitterHandler = emitter.handler
+			propertyBindings[emitterId] = rship.PropertyBinding(
+				emitterId=emitterId,
+				targetId=emitter.targetId,
+				schema=emitter.schema,
+				read=emitterHandler,
+				write=(lambda value, a=action, h=actionHandler: h(a, value)),
+			)
 
 		for actionId in self._registeredActionIds - set(actionIds):
 			CLIENT.actions.pop(actionId, None)
@@ -693,6 +712,7 @@ class RshipExt:
 		deadEngines = list(comp_engine.prune_dead_engines())
 		for dead in deadEngines:
 			dead.instance = self.instance
+			CLIENT.sendEvent(CLIENT.buildDelEvent({'id': dead.id}, itemType='CompEngine'))
 			prefix = dead.id + ":"
 			for actionId in [key for key in CLIENT.actions if key.startswith(prefix)]:
 				CLIENT.actions.pop(actionId, None)
@@ -731,10 +751,27 @@ class RshipExt:
 
 		self.instance.status = InstanceStatus.Available.value
 		self._sendRegistrationEvents([CLIENT.buildSetEvent(self.instance)], generation)
+		self._configureRequiredStateViews(propertyBindings, engines)
 		self.sentTargetStatuses = {target.id: Status.Online for target in allTargets}
 		self.sentTargetStatuses.update({engine.id: Status.Online for engine in engines})
 		self.sentTargetStatuses.update({targetId: Status.Offline for targetId in self._pendingOfflineTargetIds})
 		self._publishedTargetIds = {target.id for target in allTargets}
+
+	def _configureRequiredStateViews(self, propertyBindings, engines):
+		if not hasattr(self, 'propertyController'):
+			self.propertyController = rship.ReconciledPropertyController()
+		self.propertyController.replace_bindings(propertyBindings)
+		rootTargetIds = sorted(target.getTarget().id for target in self.opTargets.values())
+		self.propertyView = CLIENT.watchViewMap(
+			key='required-properties',
+			viewId='ReconciledProperties',
+			viewItemType='ReconciledProperty',
+			params={'instanceId': self.instance.id, 'targetIds': rootTargetIds},
+			onChange=self.propertyController.view_changed,
+		)
+		if hasattr(comp_engine, 'configure_required_state'):
+			self.compView = comp_engine.configure_required_state(CLIENT, self.instance, engines)
+		CLIENT.resubscribeViews()
 
 
 	def PulseEmitter(self, opPath: str, parName: str, preserveDuplicate: bool = False):
@@ -754,6 +791,8 @@ class RshipExt:
 			data = handler()
 			if data is None:
 				continue
+			if hasattr(self, 'propertyController'):
+				self.propertyController.observation_changed(emitter.id)
 			event = CLIENT.buildSetEvent(Pulse(id=emitter.id, emitterId=emitter.id, data=data))
 			if self.registration.is_active:
 				events.append(event)

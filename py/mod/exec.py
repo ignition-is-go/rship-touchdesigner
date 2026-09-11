@@ -1,8 +1,11 @@
 from datetime import datetime, timezone
 import json
 import td
+from dataclasses import dataclass
 from enum import Enum
+from types import MappingProxyType
 from typing import Callable, Dict, List, Self
+from uuid import uuid4
 
 from myko import (
 	CommandError,
@@ -25,7 +28,101 @@ from myko import (
 	WSEventBatch,
 	WSQuery,
 	WSReport,
+	MWrappedView,
+	WSView,
+	WSViewCancel,
+	WSViewSampleRate,
 )
+
+
+@dataclass(frozen=True)
+class ViewMapChange:
+	reset: bool
+	upsertedIds: frozenset
+	deletedIds: frozenset
+
+
+class NativeViewMap:
+	"""One persistent Myko map view. The cache changes atomically per response."""
+	def __init__(self, client, key, viewId, viewItemType, params, onChange, sampleRate=None):
+		self.client = client
+		self.key = key
+		self.viewId = viewId
+		self.viewItemType = viewItemType
+		self.params = dict(params)
+		self.tx = str(uuid4())
+		self.sampleRate = sampleRate
+		self.onChange = onChange
+		self.ready = False
+		self.sequence = None
+		self.error = None
+		self._rows = {}
+
+	@property
+	def rows(self):
+		return MappingProxyType(self._rows)
+
+	def sameSpec(self, viewId, viewItemType, params, sampleRate):
+		return (self.viewId, self.viewItemType, self.params, self.sampleRate) == (
+			viewId, viewItemType, dict(params), sampleRate)
+
+	def subscribe(self):
+		view = dict(self.params)
+		view['tx'] = self.tx
+		self.client._sendPayload(WSView(MWrappedView(
+			self.viewId, self.viewItemType, view, self.sampleRate)).__dict__)
+
+	def disconnected(self):
+		self.ready = False
+		self.sequence = None
+		self.error = None
+
+	def cancel(self):
+		self.client._sendPayload(WSViewCancel(self.tx).__dict__)
+
+	def setSampleRate(self, rate):
+		self.sampleRate = rate
+		self.client._sendPayload(WSViewSampleRate(self.tx, rate).__dict__)
+
+	def handleResponse(self, data):
+		sequence = data.get('sequence')
+		if not isinstance(sequence, int) or isinstance(sequence, bool) or sequence < 0:
+			raise ValueError('View response has invalid sequence')
+		if sequence != 0:
+			if not self.ready:
+				raise ValueError('View delta received before initial snapshot')
+			if sequence != self.sequence + 1:
+				raise ValueError(f'Out-of-order view sequence {sequence}; expected {self.sequence + 1}')
+
+		upserts = data.get('upserts', [])
+		deletes = data.get('deletes', [])
+		if not isinstance(upserts, list) or not isinstance(deletes, list):
+			raise ValueError('View response upserts/deletes must be lists')
+		parsed = {}
+		for wrapped in upserts:
+			if not isinstance(wrapped, dict) or wrapped.get('itemType') != self.viewItemType:
+				raise ValueError('View response has wrong item type')
+			item = wrapped.get('item')
+			if not isinstance(item, dict) or not isinstance(item.get('id'), str):
+				raise ValueError('View upsert is missing item.id')
+			parsed[item['id']] = dict(item)
+		if any(not isinstance(item_id, str) for item_id in deletes):
+			raise ValueError('View delete ids must be strings')
+
+		next_rows = {} if sequence == 0 else dict(self._rows)
+		for item_id in deletes:
+			next_rows.pop(item_id, None)
+		next_rows.update(parsed)
+		self._rows = next_rows
+		self.sequence = sequence
+		self.ready = True
+		self.error = None
+		change = ViewMapChange(sequence == 0, frozenset(parsed), frozenset(deletes))
+		try:
+			self.onChange(self, change)
+		except Exception as error:
+			self.client.log(f'View consumer failed [{self.viewId}]: {error}')
+		return change
 
 
 class Target(MItem):
@@ -321,6 +418,9 @@ class ExecClient:
 		# emitterId -> callable returning the emitter's current value. Used to seed
 		# property values and to answer the server's ResendEmitterValue command.
 		self.emitterValueProviders: Dict[str, callable] = {}
+		self.viewMaps: Dict[str, NativeViewMap] = {}
+		self._viewsByTx: Dict[str, NativeViewMap] = {}
+		self.commandHandlers: Dict[str, callable] = {}
 
 	def setSend(self, send):
 		self.send = send
@@ -337,6 +437,9 @@ class ExecClient:
 
 	def buildSetEvent(self, item: MItem | dict, itemType: str | None = None) -> MEvent:
 		return MEvent(changeType=MEventType.SET, item=item, itemType=itemType)
+
+	def buildDelEvent(self, item: MItem | dict, itemType: str | None = None) -> MEvent:
+		return MEvent(changeType=MEventType.DEL, item=item, itemType=itemType)
 
 	def sendEvent(self, event: MEvent):
 		self._sendPayload(WSEvent(event).__dict__)
@@ -370,6 +473,10 @@ class ExecClient:
 				self.parseReportResponse(data)
 			elif event == 'ws:m:report-error':
 				self.parseReportError(data)
+			elif event == 'ws:m:view-response':
+				self.parseViewResponse(data or {})
+			elif event == 'ws:m:view-error':
+				self.parseViewError(data or {})
 			elif event == 'ws:m:command-response':
 				self.log(f"Command acknowledged for tx={data.get('tx', 'unknown')}")
 			elif event == 'ws:m:command-error':
@@ -441,8 +548,66 @@ class ExecClient:
 			self.handleCompactBatchTargetAction(commandId, command)
 		elif commandId == 'ResendEmitterValue':
 			self.handleResendEmitterValue(command, respond=True)
+		elif commandId in self.commandHandlers:
+			try:
+				response = self.commandHandlers[commandId](command)
+				self.sendCommandResponse(command.get('tx', ''), response)
+			except Exception as error:
+				self.sendCommandError(command.get('tx', ''), commandId, str(error))
 		else:
 			self.log(f'Unhandled commandId: {commandId}')
+
+	def setCommandHandler(self, commandId: str, handler):
+		if handler is None:
+			self.commandHandlers.pop(commandId, None)
+		else:
+			self.commandHandlers[commandId] = handler
+
+	def watchViewMap(self, key, viewId, viewItemType, params, onChange, sampleRate=None):
+		current = self.viewMaps.get(key)
+		if current is not None and current.sameSpec(viewId, viewItemType, params, sampleRate):
+			current.onChange = onChange
+			return current
+		if current is not None:
+			self._viewsByTx.pop(current.tx, None)
+			try:
+				current.cancel()
+			except RuntimeError:
+				pass
+		view = NativeViewMap(self, key, viewId, viewItemType, params, onChange, sampleRate)
+		self.viewMaps[key] = view
+		self._viewsByTx[view.tx] = view
+		return view
+
+	def resubscribeViews(self):
+		for view in self.viewMaps.values():
+			view.subscribe()
+
+	def disconnectViews(self):
+		for view in self.viewMaps.values():
+			view.disconnected()
+
+	def parseViewResponse(self, data):
+		view = self._viewsByTx.get(data.get('tx'))
+		if view is None:
+			self.log('View response for unknown tx')
+			return
+		try:
+			view.handleResponse(data)
+		except Exception as error:
+			view.error = str(error)
+			view.ready = False
+			self.log(f'View error [{view.viewId}] tx={view.tx}: {error}')
+			view.subscribe()
+
+	def parseViewError(self, data):
+		view = self._viewsByTx.get(data.get('tx'))
+		if view is None:
+			return
+		view.error = data.get('message', 'Unknown view error')
+		view.ready = False
+		self.log(f'View error [{view.viewId}] tx={view.tx}: {view.error}')
+		view.subscribe()
 
 	def parseEvent(self, data):
 		"""Inbound MEvent-style frames (itemType + item). Currently only used for
@@ -698,6 +863,19 @@ def _shared_client() -> ExecClient:
 	if c is None:
 		c = ExecClient()
 		td._rship_client = c
+	else:
+		c.__class__ = ExecClient
+	# DAT reloads keep the td-anchored instance but replace this module's class.
+	# Hydrate fields introduced by newer epochs without relying on class identity.
+	if not hasattr(c, 'viewMaps'):
+		c.viewMaps = {}
+	if not hasattr(c, '_viewsByTx'):
+		c._viewsByTx = {}
+	if not hasattr(c, 'commandHandlers'):
+		c.commandHandlers = {}
+	for view in c.viewMaps.values():
+		view.__class__ = NativeViewMap
+		view.client = c
 	return c
 
 

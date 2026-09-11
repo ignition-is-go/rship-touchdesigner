@@ -2,36 +2,30 @@
 comp_engine — Python port of the rship comp-engine executor SDK.
 
 Comp engine = server-authoritative dynamic placement/topology. You declare element
-KINDS once; the rship server's reactive solver decides which element instances are
-placed, ordered, wired, and animated, and hands you an Assignment to RENDER. You never
-author placement/merge/order/capacity.
+KINDS once; native required-state rows describe which instances must be placed,
+ordered, wired, and animated. You never author placement/merge/order/capacity.
 
 Two planes:
-  - TOPOLOGY  — which instances exist (kind, wiring, order). Arrives via the reserved
-    `apply` action carrying an Assignment; you render it. Only on structural change.
-  - VALUE     — animated per-instance caps + presence. These are literally Properties
-    (SetCap action + cap readback emitter); driven every frame, reconciled by the same
-    readback-pulse machinery as the rest of the executor (exec.CLIENT).
+  - TOPOLOGY  — Element rows describe which instances exist, their kind, wiring,
+    and order. Structural changes render coherent assignments.
+  - VALUE     — Cap and Presence rows update applied instances without rebuilding
+    topology.
 
 Strictly opt-in: declare no kinds and you simply aren't a comp engine.
 
 This mirrors libs/sdk/rs/src/comp_engine/ (KindDefBuilder / KindRegistryBuilder /
 KindHandler / CompEngineProxy). See memory rship-comp-engine for the full spec/casing.
 
-WIRE-SHAPE TODOs (confirm with malcolm:rship before relying on server round-trip):
-  - The CompEngine *declaration* item shape (how the engine + KindRegistry is published
-    and how the server maps its reserved verbs to our action ids). `_declarationItem()`
-    is a best-guess; flagged below.
-  - SchemaRef wire shape — passed through verbatim for now.
-  - Reserved-action id scheme — we mint `<engine_id>:apply` etc.; spot-check vs a live frame.
+The native wire contract is pinned to rship b8a2739dd4.
 """
 import dataclasses
+import math
 import typing
 
 import td
 import tdu
 
-from exec import CLIENT, Action, Emitter, Status, Target, makeWriterRef
+from exec import CLIENT, Emitter, Status, Target
 
 # Top-level (NOT lazy) so it resolves in comp_engine's OWN module context. A lazy `import
 # par_schema` inside a function resolves relative to the CALLER's op (a base outside rship
@@ -426,7 +420,7 @@ class SequenceReflector:
     def fire(self, instance, field):
         """A trigger fired (button_id == field): pulse the matching par on the block that
         currently holds `instance`. No-op if the instance isn't placed or field isn't a par."""
-        key = (instance.get("compElementId"), instance.get("instanceTag", ""))
+        key = instance.get("compElementId")
         i = self._block_index.get(key)
         if i is None:
             return
@@ -440,7 +434,7 @@ class SequenceReflector:
         ordered = sorted(batch, key=lambda ka: (ka.order_index if ka.order_index is not None else 0))
         n = len(ordered)
         # block index per instance, so a fired trigger can pulse the right block's par (fire())
-        self._block_index = {(ka.instance.get("compElementId"), ka.instance.get("instanceTag", "")): i
+        self._block_index = {ka.instance.get("compElementId"): i
                              for i, ka in enumerate(ordered)}
         # Publish the TRUE placed count (0..N) on the stack-length par. TD can't have 0 blocks,
         # so numBlocks is clamped to >=1 (a placeholder block when empty) — downstream reads
@@ -532,7 +526,7 @@ class SequenceReflector:
 @dataclasses.dataclass
 class KindAssignment:
     """One placed instance handed to a kind's on_apply."""
-    instance: dict          # {"compElementId":.., "instanceTag":..}
+    instance: dict          # {"compElementId":..}
     caps: dict              # {cap_id: value}  (current value-plane bag)
     presence: float
     wire_inputs: list       # [WireInputEntry] raw {pinId, source: CrossEngineRef}
@@ -657,7 +651,10 @@ def _engines() -> dict:
 
 
 def get_engines() -> list:
-    return list(_engines().values())
+    engines = list(_engines().values())
+    for engine in engines:
+        engine.__class__ = CompEngineProxy
+    return engines
 
 
 def prune_dead_engines() -> list:
@@ -692,7 +689,7 @@ def _output_key(engine_id, instance, channel) -> tuple:
     # instance None => engine-level (singleton/aggregator) ref; else element-level.
     if instance is None:
         return (engine_id, None, channel)
-    return (engine_id, (instance.get("compElementId"), instance.get("instanceTag", "")), channel)
+    return (engine_id, instance.get("compElementId"), channel)
 
 
 def register_output(engine_id, instance, channel, value):
@@ -811,6 +808,10 @@ def _engine_slug(name: str) -> str:
     return "".join(c if c.isalnum() else "-" for c in str(name).lower()).strip("-") or "engine"
 
 
+def _output_emitter_id(engine_id, instance, channel):
+    return f"{engine_id}:output:{instance.get('compElementId')}::{channel}"
+
+
 def _field_schema(refl, sequence, field):
     """Schema for a sequence field's output channel — WellKnown if one fits, else a Custom
     (inline-JSON) ref; both lossless, never a lossy Scalar collapse. None if the field is
@@ -871,19 +872,16 @@ def sequence_manager(ownerComp, *, kind, engine_name, sequence="Sequence", short
 
 
 class CompEngineProxy:
-    """The engine runtime. Stands itself up on the server via publish() (the ordered
-    sequence the SDK requires) and renders Assignments. The value plane (caps/presence)
-    and committed_state ride exec.CLIENT's property/provider machinery, so reconnect
-    re-pulse is handled by RshipExt.seedProperties."""
+    """The engine declaration and local materialization runtime."""
 
     def __init__(self, ownerComp, args: CompEngineArgs, key: str):
         self.instance = None            # injected by RshipExt before publish()
         self.ownerComp = ownerComp
         self.args = args
         self.key = key
-        # last committed Assignment (the committed_state readback + cold-start gate)
+        # Last locally applied assignment; used by existing handler contexts.
         self._committed = {"slotStates": [], "overflow": [], "generation": 0}
-        # current rendered slots (TOPOLOGY), keyed by instance id "(compElementId, instanceTag)".
+        # Current rendered slots, keyed by binding-node compElementId.
         # Holds {"slot": <slotState>, "state": <ref into _inst_state>} — rebuilt every apply.
         self._slots: typing.Dict[tuple, dict] = {}
         # PERSISTENT per-instance value-plane state (caps + presence), keyed by the SAME instance id
@@ -893,9 +891,6 @@ class CompEngineProxy:
         # _render) so values SURVIVE an unrelated re-apply instead of resetting to None/disabled.
         self._inst_state: typing.Dict[tuple, dict] = {}          # ik -> {"bag": {capId: val}, "presence": val}
         self._readback_last: typing.Dict[str, typing.Any] = {}   # emitterId -> last pulsed (dedup)
-        self._last_apply_sig = None                              # render-signature of last APPLIED
-                                                                 # assignment (skip render-equivalent
-                                                                 # re-dispatches — see _handle_apply)
 
     # --- identity ---
     @property
@@ -918,9 +913,9 @@ class CompEngineProxy:
         if self.instance is not None:
             CLIENT.setTargetStatus(self.id, self.instance.id, Status.Offline)
 
-    # --- publish (ordered stand-up sequence; order matters) ---
+    # --- publish ---
     def publish(self, online=True, seed=True):
-        """Publish the engine definitions, with readiness and seeding optionally delayed."""
+        """Publish the engine target and native required-state declaration."""
         if self.instance is None:
             return
         eid = self.id
@@ -938,26 +933,25 @@ class CompEngineProxy:
         CLIENT.set(engine_target)
         if online:
             CLIENT.setTargetStatus(eid, self.instance.id, Status.Online)
-        # 2. reserved EMITTERS first (committed_state must exist before the apply action)
-        self._register_emitter(self._rid("prep_report"), "Prep Report", provider=(lambda: None))
-        self._register_emitter(self._rid("committed_state"), "Committed State",
-                               provider=(lambda: self._committed))
-        # 3. reserved ACTIONS — apply is the CANONICAL WRITER of committed_state
-        self._register_action(self._rid("apply"), "Apply", self._handle_apply,
-                              writesTo=makeWriterRef(self._rid("committed_state")))
-        self._register_action(self._rid("prepare"), "Prepare", self._handle_prepare)
-        self._register_action(self._rid("cancel"), "Cancel", self._handle_cancel)
-        self._register_action(self._rid("request_state"), "Request State", self._handle_request_state)
-        # 4. the CompEngine entity (server maps verbs -> ids via its named fields)
+        # DAT reloads preserve CLIENT, so explicitly remove the superseded protocol.
+        for suffix in ('prep_report', 'committed_state', 'apply', 'prepare', 'cancel', 'request_state'):
+            legacy_id = self._rid(suffix)
+            CLIENT.actions.pop(legacy_id, None)
+            CLIENT.handlers.pop(legacy_id, None)
+            CLIENT.emitterValueProviders.pop(legacy_id, None)
+        for slot_state in self._slots.values():
+            slot = slot_state.get('slot', {})
+            action_ids = [cv.get('actionId') for cv in slot.get('capValues', [])]
+            action_ids += [slot.get('presenceActionId')]
+            action_ids += [button.get('actionId') for button in slot.get('buttonActions', [])]
+            emitter_ids = [cv.get('emitterId') for cv in slot.get('capValues', [])]
+            emitter_ids += [slot.get('presenceEmitterId')]
+            for action_id in filter(None, action_ids):
+                CLIENT.actions.pop(action_id, None)
+                CLIENT.handlers.pop(action_id, None)
+            for emitter_id in filter(None, emitter_ids):
+                CLIENT.emitterValueProviders.pop(emitter_id, None)
         CLIENT.sendEvent(CLIENT.buildSetEvent(self._engine_entity(), itemType="CompEngine"))
-        # 5. initial committed_state baseline (empty on first stand-up; last committed on reconnect)
-        if seed:
-            CLIENT.pulseEmitter(self._rid("committed_state"), self._committed)
-        # Re-register per-instance readback providers from the engine-owned cache.
-        # (Inbound SetCap handlers live in CLIENT.handlers, which is never cleared.)
-        for emitter_id in list(self._readback_last.keys()):
-            CLIENT.saveEmitterValueProvider(emitter_id,
-                                            (lambda eid=emitter_id: self._readback_last.get(eid)))
 
     def _engine_entity(self) -> dict:
         eid = self.id
@@ -968,82 +962,12 @@ class CompEngineProxy:
             "hostTargetId": self._host_id(),
             "displayName": self.args.display_name,
             "kindRegistry": self.args.kind_registry.to_wire(),
-            "prepTimeoutMs": self.args.prep_timeout_ms,
-            # the server maps verb -> action/emitter id via THESE named fields (not id suffix)
-            "prepareActionId": self._rid("prepare"),
-            "applyActionId": self._rid("apply"),
-            "cancelActionId": self._rid("cancel"),
-            "requestStateActionId": self._rid("request_state"),
-            "prepReportEmitterId": self._rid("prep_report"),
-            "committedStateEmitterId": self._rid("committed_state"),
-            "caps": [],                                 # server-mutated; always empty at creation
             "outputs": [],
         }
 
-    # --- reserved-action inbound handlers (server -> executor) ---
-    def _handle_prepare(self, action, data):
-        env = data or {}
-        assignment = env.get("targetState", {})
-        ctx = ApplyCtx(self, assignment.get("generation", 0), env.get("transactionId"))
-        batch_by_kind = self._batch_by_kind(assignment)
-        report = PrepReport.ready()
-        for kind_id, batch in batch_by_kind.items():
-            handler = self.args.kind_registry.handlers.get(kind_id)
-            if handler is not None:
-                r = handler.on_prepare(ctx, batch)
-                if r and r.get("kind") == "failed":
-                    report = r
-                    break
-        CLIENT.pulseEmitter(self._rid("prep_report"), report)
-        return None
-
-    def _render_sig(self, assignment):
-        """A cheap content signature of the render-RELEVANT parts of an assignment (everything
-        EXCEPT the free-running generation): each instance's id/kind/presence/caps/wires. Two
-        assignments with the same signature render identically, so an apply that only bumps the
-        generation (a re-dispatch, or the trailing applies of a settling cascade) can skip the
-        expensive re-register + full render. Pure Python — far cheaper than a render."""
-        parts = []
-        for s in assignment.get("slotStates", []):
-            inst = s.get("boundInstance", {})
-            caps = tuple(sorted((cv.get("capId"), repr(cv.get("value"))) for cv in s.get("capValues", [])))
-            wires = tuple(sorted((w.get("pinId"),
-                                  (w.get("source") or {}).get("sourceInstance", {}).get("compElementId"))
-                                 for w in (s.get("wireInputValues") or [])))
-            parts.append((inst.get("compElementId"), inst.get("instanceTag", ""),
-                          s.get("kind"), repr(s.get("presence")), caps, wires))
-        return tuple(sorted(parts))
-
-    def _handle_apply(self, action, data):
-        env = data or {}
-        assignment = env.get("targetState", {"slotStates": [], "overflow": [], "generation": 0})
-        # APPLY DEDUP: the server may re-dispatch the same apply (or a placement cascade may emit
-        # several applies) whose render-relevant content is identical — only the free-running
-        # generation differs. Re-running the re-register + full render for those is pure stall, so
-        # skip _render when the signature is unchanged. Still echo committed_state (cheap) so the
-        # reconcile sees our state regardless.
-        sig = self._render_sig(assignment)
-        if sig != self._last_apply_sig:
-            self._last_apply_sig = sig
-            self._render(assignment, env.get("transactionId"))
-        self._committed = assignment
-        CLIENT.pulseEmitter(self._rid("committed_state"), assignment)
-        return None
-
-    def _handle_cancel(self, action, data):
-        ctx = ApplyCtx(self, self._committed.get("generation", 0), (data or {}).get("transactionId"))
-        for handler in set(self.args.kind_registry.handlers.values()):
-            handler.on_cancel(ctx)
-        return None
-
-    def _handle_request_state(self, action, data):
-        # Re-report our committed Assignment.
-        CLIENT.pulseEmitter(self._rid("committed_state"), self._committed)
-        return None
-
     # --- render pipeline ---
     def _inst_key(self, inst: dict) -> tuple:
-        return (inst.get("compElementId"), inst.get("instanceTag", ""))
+        return inst.get("compElementId")
 
     def _resolve_inputs(self, wire_inputs) -> dict:
         """Group wireInputValues by pin and resolve each CrossEngineRef LOCALLY, in the
@@ -1096,26 +1020,16 @@ class CompEngineProxy:
             # re-issued per apply) but OVERLAY values rather than wiping — exactly how caps already
             # behave, so presence and caps stay consistent.
             state = self._inst_state.setdefault(ik, {"bag": {}, "presence": None})
+            state["bag"] = {}
             for cv in slot.get("capValues", []):
-                self._register_cap(inst, cv["capId"], cv["actionId"], cv["emitterId"])
-                val = cv.get("value")
-                if val is not None:                          # apply-seeded value (level-triggered):
-                    state["bag"][cv["capId"]] = val          # overlay it and seed the readback. A null
-                    self._seed_readback(cv["emitterId"], val)   # (unchanged / just-placed cap) must NOT
-                else:                                        # wipe a value we already hold for this inst.
-                    state["bag"].setdefault(cv["capId"], None)
-            if slot.get("presenceActionId"):
-                self._register_presence(inst, slot["presenceActionId"], slot["presenceEmitterId"])
+                state["bag"][cv["capId"]] = cv.get("value")
             # Presence, treated like a cap: if the apply SEEDS a value (server-side resting presence —
             # contract C, a "presence" value on the slot) overlay it (level-triggered, authoritative);
             # otherwise CARRY FORWARD the last-known value. Today's apply is presence-less (edge-
             # triggered via SetPresence only), so the carry-forward keeps a persisting slot from
             # resetting to None/dark when an UNRELATED topology change triggers a re-apply.
             pv = slot.get("presence")
-            if pv is not None:
-                state["presence"] = pv
-            for ba in slot.get("buttonActions", []) or []:
-                self._register_button(inst, ba["buttonId"], ba["actionId"])
+            state["presence"] = pv
             new_slots[ik] = {"slot": slot, "state": state}
         self._slots = new_slots
         # PRUNE value-state for instances no longer in the topology. Now that contract C re-seeds
@@ -1156,54 +1070,6 @@ class CompEngineProxy:
                 continue
             self._project_kind(kind_id)
 
-    # --- per-instance value-plane entities (caps = properties) ---
-    def _register_cap(self, inst, cap_id, action_id, emitter_id):
-        ik = self._inst_key(inst)
-
-        def on_set(action, value, _ik=ik, _cap=cap_id, _eid=emitter_id):
-            state = self._inst_state.get(_ik)
-            if state is None:
-                return
-            # the per-instance bag is sole source of truth: same-value early-out, then re-project.
-            if _values_equivalent(state["bag"].get(_cap), value):
-                return
-            state["bag"][_cap] = value
-            self._reproject(_ik, {"what": "cap", "cap_id": _cap, "value": value})
-            self._pulse_readback(_eid, value)
-
-        self._register_action(action_id, f"Set {cap_id}", on_set, writesTo=makeWriterRef(emitter_id))
-        self._register_emitter(emitter_id, cap_id)
-
-    def _register_presence(self, inst, action_id, emitter_id):
-        ik = self._inst_key(inst)
-
-        def on_set(action, value, _ik=ik, _eid=emitter_id):
-            state = self._inst_state.get(_ik)
-            if state is None:
-                return
-            if _values_equivalent(state.get("presence"), value):
-                return
-            state["presence"] = value
-            self._reproject(_ik, {"what": "presence", "value": value})
-            self._pulse_readback(_eid, value)
-
-        self._register_action(action_id, "Set Presence", on_set, writesTo=makeWriterRef(emitter_id))
-        self._register_emitter(emitter_id, "presence")
-
-    def _register_button(self, inst, button_id, action_id):
-        ik = self._inst_key(inst)
-
-        def on_fire(action, data, _ik=ik, _btn=button_id):
-            slot = self._slots.get(_ik)
-            if slot is None:
-                return
-            kind_id = slot["slot"].get("kind")
-            handler = self.args.kind_registry.handlers.get(kind_id)
-            if handler is not None:
-                handler.on_button_pressed(slot["slot"].get("boundInstance", {}), _btn, data)
-
-        self._register_action(action_id, f"Fire {button_id}", on_fire)   # no emitter, no reconcile
-
     def _reproject(self, ik, change=None):
         """Re-render ONE instance on a value-plane change (cap/presence) — topology is UNCHANGED,
         so route to the handler's on_value, which can update just the changed block (O(1)) instead
@@ -1220,22 +1086,13 @@ class CompEngineProxy:
         handler.on_value(ctx, s["slot"].get("boundInstance", {}), kind_id, change or {})
 
     def _emit_output(self, inst, channel, value):
-        eid = f"{self.id}:output:{inst.get('compElementId')}:{inst.get('instanceTag','')}:{channel}"
+        eid = _output_emitter_id(self.id, inst, channel)
         self._register_emitter(eid, channel)
         # consumption path: expose this instance's current output for cross-engine resolve
         # (local registry; no value travels over the wire). Engine-level (singleton)
         # producers register under instance=None — pass None as inst there.
         register_output(self.id, inst, channel, value)
         self._pulse_readback(eid, value)
-
-    # --- low-level register/pulse (sends to server via CLIENT) ---
-    def _register_action(self, action_id, name, handler, writesTo=None):
-        a = Action(id=action_id, name=name, targetId=self.id, serviceId=self.instance.serviceId,
-                   schema=None, handler=handler, writesTo=writesTo)
-        CLIENT.saveHandler(action_id, handler)
-        CLIENT.actions[action_id] = a
-        del a.handler
-        CLIENT.set(a)
 
     def _register_emitter(self, emitter_id, name, provider=None):
         # Default provider reads the last-pulsed value, so RshipExt.seedProperties
@@ -1262,6 +1119,318 @@ class CompEngineProxy:
         server even if an earlier seed was lost (raced registration / connection blip)."""
         self._readback_last[emitter_id] = value
         CLIENT.pulseEmitter(emitter_id, value)
+
+
+def _byte_len(value):
+    return len(str(value).encode('utf-8'))
+
+
+def _required_key_id(key):
+    kind = key.get('rowKind')
+    fields = [key.get('engineId'), (key.get('element') or {}).get('compElementId')]
+    if kind == 'cap':
+        fields.append(key.get('capId'))
+    elif kind == 'dependency':
+        fields.extend([
+            key.get('sourceEngineId'),
+            (key.get('sourceElement') or {}).get('compElementId'),
+        ])
+    if kind not in ('element', 'cap', 'presence', 'dependency') or any(not isinstance(v, str) for v in fields):
+        raise ValueError('Invalid required comp-engine key')
+    return kind + ':' + ''.join(f'{_byte_len(v)}:{v}' for v in fields)
+
+
+class RequiredCompEngineController:
+    def __init__(self):
+        self.client = None
+        self.instance = None
+        self.engines = {}
+        self.view = None
+        self.desired = {}
+        self.recent_events = []
+
+    def replace_engines(self, client, instance, engines):
+        self.client = client
+        self.instance = instance
+        self.engines = {engine.id: engine for engine in engines}
+
+    def view_changed(self, view, change):
+        self.view = view
+        if not view.ready:
+            return
+        try:
+            desired, dependencies = self._parse(view.rows.values())
+        except Exception as error:
+            op.RS_LOG.Error(f'[comp_engine]: invalid required-state view: {error}')
+            return
+        desired = self._eligible(desired, dependencies)
+        old = self.desired
+        self.desired = desired
+        for engine_id, engine in self.engines.items():
+            before = {k: v for k, v in old.items() if k[0] == engine_id}
+            after = {k: v for k, v in desired.items() if k[0] == engine_id}
+            if self._structures(before) != self._structures(after):
+                self._render_engine(engine, before, after)
+            else:
+                self._apply_value_changes(engine, before, after)
+                if change.reset:
+                    for key, item in after.items():
+                        self._observe_components(key, item)
+                        self._observe_element(key, 'ready', None, item['value'])
+
+    def _parse(self, rows):
+        elements = {}
+        components = []
+        dependencies = {}
+        seen_keys = set()
+        for row in rows:
+            key = row.get('key') or {}
+            value = row.get('value') or {}
+            kind = key.get('rowKind')
+            if kind != value.get('rowKind') or row.get('id') != _required_key_id(key):
+                raise ValueError(f"row {row.get('id')} has inconsistent key/value/id")
+            key_id = _required_key_id(key)
+            if key_id in seen_keys:
+                raise ValueError(f'duplicate required key {key_id}')
+            seen_keys.add(key_id)
+            element_id = (key.get('element') or {}).get('compElementId')
+            ek = (key.get('engineId'), element_id)
+            if kind == 'element':
+                elements[ek] = {
+                    'row': row,
+                    'value': dict(value),
+                    'caps': {},
+                    'presence': None,
+                }
+            elif kind == 'dependency':
+                source = (key.get('sourceEngineId'), (key.get('sourceElement') or {}).get('compElementId'))
+                dependencies[(ek, source)] = bool(value.get('ready'))
+            else:
+                components.append((kind, ek, key, value))
+        for kind, ek, key, value in components:
+            item = elements.get(ek)
+            if item is None:
+                raise ValueError(f'{kind} row has no Element row')
+            if item['value'].get('singleton') and kind in ('cap', 'presence'):
+                raise ValueError(f'{kind} row cannot target a singleton element')
+            if kind == 'cap':
+                cap_id = key.get('capId')
+                if cap_id not in item['value'].get('caps', []):
+                    raise ValueError(f'undeclared cap {cap_id}')
+                item['caps'][cap_id] = value.get('value')
+            elif kind == 'presence':
+                weight = value.get('weight')
+                if (not isinstance(weight, (int, float)) or isinstance(weight, bool)
+                        or not math.isfinite(weight) or not 0 <= weight <= 1):
+                    raise ValueError('presence must be between zero and one')
+                item['presence'] = float(weight)
+        for (consumer, source), _ready in dependencies.items():
+            item = elements.get(consumer)
+            if item is None:
+                raise ValueError('dependency row has no Element row')
+            declared = any(
+                (wire.get('source') or {}).get('sourceEngineId') == source[0]
+                and ((wire.get('source') or {}).get('sourceInstance') or {}).get('compElementId') == source[1]
+                for wire in item['value'].get('wireInputs', [])
+            )
+            if not declared:
+                raise ValueError('dependency row is not declared by an Element wire')
+        return elements, dependencies
+
+    def _eligible(self, desired, dependencies):
+        local_ids = set(self.engines)
+        eligible = {}
+        for ek, item in desired.items():
+            if ek[0] not in local_ids:
+                continue
+            ok = True
+            for wire in item['value'].get('wireInputs', []):
+                source = wire.get('source') or {}
+                source_instance = source.get('sourceInstance') or {}
+                source_key = (source.get('sourceEngineId'), source_instance.get('compElementId'))
+                if source_key[0] in local_ids:
+                    ok = source_key in desired
+                else:
+                    ok = dependencies.get((ek, source_key), False)
+                if not ok:
+                    break
+            if ok:
+                eligible[ek] = item
+        return eligible
+
+    def _structures(self, items):
+        return {key: repr({k: v for k, v in item['value'].items() if k != 'rowKind'}) for key, item in items.items()}
+
+    def _assignment(self, items):
+        slots = []
+        for (_, element_id), item in items.items():
+            value = item['value']
+            slots.append({
+                'boundInstance': {'compElementId': element_id},
+                'kind': value.get('kind'),
+                'wireInputValues': value.get('wireInputs', []),
+                'orderIndex': value.get('orderIndex'),
+                'capValues': [{'capId': cap_id, 'value': cap_value}
+                              for cap_id, cap_value in item['caps'].items()],
+                'presence': item['presence'],
+            })
+        return {'slotStates': slots, 'overflow': [], 'generation': 0}
+
+    def _render_engine(self, engine, before, after):
+        for key, item in before.items():
+            if key not in after or self._structures({key: item}) != self._structures({key: after[key]}):
+                self._observe_element(key, 'removing', None, item['value'])
+                self._delete_components(key, item)
+        for key, item in after.items():
+            if key not in before or self._structures({key: item}) != self._structures({key: before[key]}):
+                self._observe_element(key, 'preparing', None, None)
+        try:
+            assignment = self._assignment(after)
+            engine._render(assignment, None)
+            engine._committed = assignment
+        except Exception as error:
+            for key, item in after.items():
+                self._observe_element(key, 'failed', str(error), None)
+            return
+        for key, item in before.items():
+            if key not in after:
+                self._observe_element(key, 'removed', None, None)
+        for key, item in after.items():
+            self._observe_components(key, item)
+            self._observe_element(key, 'ready', None, item['value'])
+
+    def _apply_value_changes(self, engine, before, after):
+        for key, item in after.items():
+            previous = before.get(key, {'caps': {}, 'presence': None})
+            slot = engine._slots.get(key[1])
+            if slot is None:
+                continue
+            state = slot['state']
+            for cap_id in set(previous['caps']) - set(item['caps']):
+                state['bag'].pop(cap_id, None)
+                engine._reproject(key[1], {'what': 'cap', 'cap_id': cap_id, 'value': None})
+                self._del_observation(self._observation_id(key, 'cap', cap_id))
+            for cap_id, value in item['caps'].items():
+                if not _values_equivalent(previous['caps'].get(cap_id), value):
+                    state['bag'][cap_id] = value
+                    engine._reproject(key[1], {'what': 'cap', 'cap_id': cap_id, 'value': value})
+                    self._observe_cap(key, cap_id, value)
+            if not _values_equivalent(previous.get('presence'), item['presence']):
+                state['presence'] = item['presence']
+                engine._reproject(key[1], {'what': 'presence', 'value': item['presence']})
+                if item['presence'] is None:
+                    self._del_observation(self._observation_id(key, 'presence'))
+                else:
+                    self._observe_presence(key, item['presence'])
+
+    def _observation_id(self, key, component='element', cap_id=None):
+        required_id = component + ':' + ''.join(f'{_byte_len(v)}:{v}' for v in (
+            [key[0], key[1], cap_id] if cap_id is not None else [key[0], key[1]]))
+        instance_id = self.instance.id
+        return f'observation:{_byte_len(instance_id)}:{instance_id}{_byte_len(required_id)}:{required_id}'
+
+    def _set_observation(self, item):
+        self.client.sendEvent(self.client.buildSetEvent(item, itemType='CompEngineObservedStateRow'))
+
+    def _del_observation(self, item_id):
+        self.client.sendEvent(self.client.buildDelEvent({'id': item_id}, itemType='CompEngineObservedStateRow'))
+
+    def _observe_element(self, key, phase, error, element_value):
+        item = {
+            'id': self._observation_id(key),
+            'instanceId': self.instance.id,
+            'engineId': key[0],
+            'element': {'compElementId': key[1]},
+            'value': {'kind': 'element', 'phase': phase, 'error': error},
+        }
+        if element_value is not None:
+            item['elementValue'] = dict(element_value)
+        self._set_observation(item)
+
+    def _observe_cap(self, key, cap_id, value):
+        self._set_observation({
+            'id': self._observation_id(key, 'cap', cap_id), 'instanceId': self.instance.id,
+            'engineId': key[0], 'element': {'compElementId': key[1]},
+            'value': {'kind': 'cap', 'capId': cap_id, 'value': value, 'error': None},
+        })
+
+    def _observe_presence(self, key, weight):
+        if weight is None:
+            return
+        self._set_observation({
+            'id': self._observation_id(key, 'presence'), 'instanceId': self.instance.id,
+            'engineId': key[0], 'element': {'compElementId': key[1]},
+            'value': {'kind': 'presence', 'weight': weight, 'error': None},
+        })
+
+    def _observe_components(self, key, item):
+        for cap_id, value in item['caps'].items():
+            self._observe_cap(key, cap_id, value)
+        self._observe_presence(key, item['presence'])
+
+    def _delete_components(self, key, item):
+        for cap_id in item['caps']:
+            self._del_observation(self._observation_id(key, 'cap', cap_id))
+        if item['presence'] is not None:
+            self._del_observation(self._observation_id(key, 'presence'))
+
+    def deliver_trigger(self, command):
+        if self.view is None or not self.view.ready:
+            raise ValueError('Required comp-engine state is not ready')
+        if command.get('instanceId') != self.instance.id:
+            raise ValueError('Trigger belongs to another instance')
+        event_id = command.get('eventId')
+        if not isinstance(event_id, str) or not event_id:
+            raise ValueError('Trigger is missing eventId')
+        if event_id in self.recent_events:
+            return None
+        element_id = (command.get('element') or {}).get('compElementId')
+        key = (command.get('engineId'), element_id)
+        item = self.desired.get(key)
+        engine = self.engines.get(key[0])
+        trigger_id = command.get('triggerId')
+        if item is None or engine is None or trigger_id not in item['value'].get('triggers', []):
+            raise ValueError('Trigger is not declared on an applied element')
+        slot = engine._slots.get(element_id)
+        if slot is None:
+            raise ValueError('Trigger element is not applied')
+        handler = engine.args.kind_registry.handlers.get(item['value'].get('kind'))
+        if handler is None:
+            raise ValueError('No handler for trigger element kind')
+        handler.on_button_pressed({'compElementId': element_id}, trigger_id, command.get('payload'))
+        self.recent_events.append(event_id)
+        if len(self.recent_events) > 1024:
+            del self.recent_events[:-1024]
+
+
+def _required_controller():
+    controller = getattr(td, '_rship_required_comp_engine', None)
+    if controller is None:
+        controller = RequiredCompEngineController()
+        td._rship_required_comp_engine = controller
+    else:
+        controller.__class__ = RequiredCompEngineController
+        for name, default in (
+            ('client', None), ('instance', None), ('engines', {}), ('view', None),
+            ('desired', {}), ('recent_events', []),
+        ):
+            if not hasattr(controller, name):
+                setattr(controller, name, default)
+    return controller
+
+
+def configure_required_state(client, instance, engines):
+    controller = _required_controller()
+    controller.replace_engines(client, instance, engines)
+    view = client.watchViewMap(
+        key='required-comp-engine-state',
+        viewId='RequiredCompEngineState',
+        viewItemType='RequiredCompEngineStateRow',
+        params={'instanceId': instance.id},
+        onChange=controller.view_changed,
+    )
+    client.setCommandHandler('DeliverCompEngineTrigger', controller.deliver_trigger)
+    return view
 
 
 def _values_equivalent(a, b) -> bool:

@@ -153,5 +153,47 @@ class RshipExtRegistrationTests(unittest.TestCase):
         self.assertTrue(self.extension.registration.is_active)
 
 
+class ReconciledPropertyTests(unittest.TestCase):
+    def setUp(self):
+        self.value = 1
+        self.writes = []
+        self.controller = RSHIP_EXT.rship.ReconciledPropertyController()
+        self.controller.replace_bindings({
+            'emitter': RSHIP_EXT.rship.PropertyBinding(
+                emitterId='emitter', targetId='target', schema={'type': 'integer'},
+                read=lambda: self.value, write=self.write,
+            )
+        })
+        RSHIP_EXT.rship.op = types.SimpleNamespace(RS_LOG=FakeLog())
+
+    def write(self, value):
+        self.writes.append(value)
+        self.value = value
+
+    def view(self, rows, reset=True, upserts=()):
+        change = types.SimpleNamespace(reset=reset, upsertedIds=frozenset(upserts))
+        view = types.SimpleNamespace(ready=True, rows=rows)
+        self.controller.view_changed(view, change)
+
+    def test_applies_raw_value_through_local_setter(self):
+        self.view({'emitter': {
+            'id': 'emitter', 'emitterId': 'emitter', 'targetId': 'target',
+            'schema': {'type': 'integer'}, 'value': 7,
+        }}, upserts=('emitter',))
+        self.assertEqual(self.writes, [7])
+        self.assertEqual(self.value, 7)
+
+    def test_withdrawal_does_not_write_null_and_drift_is_corrected(self):
+        row = {'id': 'emitter', 'emitterId': 'emitter', 'targetId': 'target',
+               'schema': {'type': 'integer'}, 'value': 7}
+        self.view({'emitter': row}, upserts=('emitter',))
+        self.view({})
+        self.assertEqual(self.writes, [7])
+        self.view({'emitter': row}, upserts=('emitter',))
+        self.value = 3
+        self.controller.observation_changed('emitter')
+        self.assertEqual(self.writes, [7, 7, 7])
+
+
 if __name__ == "__main__":
     unittest.main()

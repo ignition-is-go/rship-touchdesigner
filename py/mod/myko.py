@@ -112,6 +112,33 @@ class WSReport:
 		self.data = data.__dict__ if hasattr(data, '__dict__') else data
 
 
+class MWrappedView:
+	def __init__(self, viewId: str, viewItemType: str, view: dict, sampleRate=None):
+		self.view = deepcopy(view)
+		self.viewId = viewId
+		self.viewItemType = viewItemType
+		if sampleRate is not None:
+			self.sampleRate = sampleRate
+
+
+class WSView:
+	def __init__(self, data: MWrappedView):
+		self.event = 'ws:m:view'
+		self.data = data.__dict__
+
+
+class WSViewCancel:
+	def __init__(self, tx: str):
+		self.event = 'ws:m:view-cancel'
+		self.data = {'tx': tx}
+
+
+class WSViewSampleRate:
+	def __init__(self, tx: str, sampleRate):
+		self.event = 'ws:m:view-sample-rate'
+		self.data = {'tx': tx, 'sampleRate': sampleRate}
+
+
 class MCommand:
 	def __init__(self, createdAt: str | None = None, tx: str | None = None):
 		self.tx = tx or str(uuid4())
