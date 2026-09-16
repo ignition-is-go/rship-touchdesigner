@@ -86,7 +86,13 @@ class SequencePropertyTests(unittest.TestCase):
         return [event["item"]["data"] for event in self.events()
                 if event["itemType"] == "Pulse" and event["item"]["emitterId"] == emitter]
 
-    def test_state_pair_preserves_legacy_schema_and_ids_but_excludes_events(self):
+    def tick(self, suffix):
+        return {"id": f"00000000-0000-4000-8000-{suffix:012d}", "prev": None, "next": None}
+
+    def nil_tick(self):
+        return {"id": "00000000-0000-0000-0000-000000000000", "prev": None, "next": None}
+
+    def test_state_pair_includes_exec_tick_members(self):
         _, _, _ = self.start()
         actions = {event["item"]["id"]: event["item"] for event in self.events() if event["itemType"] == "Action"}
         self.assertEqual(set(actions), {"operator:Generator:set", "operator:Generator:resend", "operator:Generator:state_set"})
@@ -95,18 +101,23 @@ class SequencePropertyTests(unittest.TestCase):
         state = actions["operator:Generator:state_set"]
         self.assertEqual(state["writesTo"], {"emitterId": "operator:Generator:state_updated", "role": "canonical"})
         self.assertEqual(state["schema"]["type"], "array")
-        self.assertEqual(set(state["schema"]["items"]["properties"]), {"Value", "Selected", "Enabled"})
+        self.assertEqual(set(state["schema"]["items"]["properties"]),
+                         {"Value", "Selected", "Enabled", "Emit", "Clear"})
+        self.assertEqual(state["schema"]["items"]["properties"]["Emit"]["format"], "exec-tick")
         self.assertEqual(set(actions["operator:Generator:set"]["schema"]["items"]["properties"]),
                          {"Value", "Selected", "Enabled", "Emit", "Clear"})
+        self.assertEqual(actions["operator:Generator:set"]["schema"]["items"]["properties"]["Emit"]["format"],
+                         "exec-tick")
         self.assertEqual(self.pulse_data("operator:Generator:state_updated"),
-                         [[{"Value": 0.25, "Selected": "0", "Enabled": False}]])
+                         [[{"Value": 0.25, "Selected": "0", "Enabled": False,
+                            "Emit": self.nil_tick(), "Clear": self.nil_tick()}]])
         self.assertEqual(set(self.client.emitterValueProviders), {"operator:Generator:state_updated"})
 
-    def test_state_arrays_resize_and_assign_values_without_pulsing_injected_event_keys(self):
+    def test_state_arrays_resize_assign_values_and_deduplicate_exec_ticks(self):
         extension, target, sequence = self.start()
         self.frames.clear()
-        data = [{"Value": 0.8, "Selected": "7", "Enabled": True, "Emit": True, "Clear": True},
-                {"Value": 0.3, "Selected": "0", "Enabled": False, "Emit": True}]
+        data = [{"Value": 0.8, "Selected": "7", "Enabled": True, "Emit": self.tick(1), "Clear": self.tick(2)},
+                {"Value": 0.3, "Selected": "0", "Enabled": False, "Emit": self.tick(3)}]
         self.set_sequence(extension, data)
         self.set_sequence(extension, data)
         self.assertEqual(sequence.numBlocks, 2)
@@ -116,11 +127,14 @@ class SequencePropertyTests(unittest.TestCase):
         self.assertEqual(target.ownerComp.par["Generator0Enabled"].eval(), True)
         self.assertEqual(target.ownerComp.par["Generator1Value"].eval(), 0.3)
         for index in range(2):
-            self.assertEqual(target.ownerComp.par[f"Generator{index}Emit"].pulses, 0)
-            self.assertEqual(target.ownerComp.par[f"Generator{index}Clear"].pulses, 0)
+            self.assertEqual(target.ownerComp.par[f"Generator{index}Emit"].pulses, 1)
+        self.assertEqual(target.ownerComp.par["Generator0Clear"].pulses, 1)
+        self.assertEqual(target.ownerComp.par["Generator1Clear"].pulses, 0)
         self.assertEqual(self.pulse_data("operator:Generator:state_updated"), [
-            [{"Value": 0.8, "Selected": "7", "Enabled": True}, {"Value": 0.3, "Selected": "0", "Enabled": False}],
-            [{"Value": 0.8, "Selected": "7", "Enabled": True}, {"Value": 0.3, "Selected": "0", "Enabled": False}],
+            [{"Value": 0.8, "Selected": "7", "Enabled": True, "Emit": self.tick(1), "Clear": self.tick(2)},
+             {"Value": 0.3, "Selected": "0", "Enabled": False, "Emit": self.tick(3), "Clear": self.nil_tick()}],
+            [{"Value": 0.8, "Selected": "7", "Enabled": True, "Emit": self.tick(1), "Clear": self.tick(2)},
+             {"Value": 0.3, "Selected": "0", "Enabled": False, "Emit": self.tick(3), "Clear": self.nil_tick()}],
         ])
 
     def test_current_readback_tracks_manual_values_and_manual_resize(self):
@@ -131,8 +145,8 @@ class SequencePropertyTests(unittest.TestCase):
         self.frames.clear()
         extension.OnRshipReceiveText(self.resend("operator:Generator:state_updated"))
         self.assertEqual(self.pulse_data("operator:Generator:state_updated"), [[
-            {"Value": 0.9, "Selected": "0", "Enabled": False},
-            {"Value": 0.25, "Selected": "7", "Enabled": False},
+            {"Value": 0.9, "Selected": "0", "Enabled": False, "Emit": self.nil_tick(), "Clear": self.nil_tick()},
+            {"Value": 0.25, "Selected": "7", "Enabled": False, "Emit": self.nil_tick(), "Clear": self.nil_tick()},
         ]])
         self.assertEqual(self.frames[-1]["event"], "ws:m:command-response")
 
@@ -163,19 +177,23 @@ class SequencePropertyTests(unittest.TestCase):
         self.assertEqual(sequence.resize_calls, [])
         self.assertEqual(self.frames[-1]["event"], "ws:m:command-error")
 
-    def test_legacy_set_still_fires_every_explicit_pulse(self):
+    def test_exec_tick_set_fires_once_per_unique_id(self):
         extension, target, _ = self.start()
-        for _ in range(2):
-            self.set_sequence(extension, [{"Value": 0.6, "Emit": True, "Clear": True}], state=False)
+        payload = [{"Value": 0.6, "Emit": self.tick(1), "Clear": self.tick(2)}]
+        self.set_sequence(extension, payload, state=False)
+        self.set_sequence(extension, payload, state=False)
+        self.assertEqual(target.ownerComp.par["Generator0Emit"].pulses, 1)
+        self.assertEqual(target.ownerComp.par["Generator0Clear"].pulses, 1)
+        self.set_sequence(extension, [{"Value": 0.6, "Emit": self.tick(3), "Clear": self.tick(2)}], state=False)
         self.assertEqual(target.ownerComp.par["Generator0Emit"].pulses, 2)
-        self.assertEqual(target.ownerComp.par["Generator0Clear"].pulses, 2)
         self.assertEqual(target.ownerComp.par["Generator0Value"].eval(), 0.6)
         self.frames.clear()
         extension.OnRshipReceiveText(self.command("ExecTargetAction", {
             "tx": "legacy-resend", "action": {"id": "operator:Generator:resend", "targetId": "operator:Generator"}, "data": None,
         }))
         self.assertEqual(self.pulse_data("operator:Generator:updated"),
-                         [[{"Value": 0.6, "Selected": "0", "Enabled": False, "Emit": None, "Clear": None}]])
+                         [[{"Value": 0.6, "Selected": "0", "Enabled": False,
+                            "Emit": self.tick(3), "Clear": self.tick(2)}]])
 
     def test_shared_change_keys_publish_both_emitters_and_preserve_legacy_duplicate_events(self):
         extension, target, _ = self.start()
@@ -186,7 +204,8 @@ class SequencePropertyTests(unittest.TestCase):
             extension._flushPulses()
             self.assertEqual(len(self.pulse_data("operator:Generator:updated")), 1)
             self.assertEqual(self.pulse_data("operator:Generator:state_updated"),
-                             [[{"Value": 0.4, "Selected": "0", "Enabled": False}]])
+                             [[{"Value": 0.4, "Selected": "0", "Enabled": False,
+                                "Emit": self.nil_tick(), "Clear": self.nil_tick()}]])
             self.frames.clear()
             extension.PulseEmitter(target.ownerComp, "Generator", preserveDuplicate=True)
             extension.PulseEmitter(target.ownerComp, "Generator", preserveDuplicate=True)
@@ -221,18 +240,23 @@ class SequencePropertyTests(unittest.TestCase):
                 "operator:BuiltIn", "operator", target.ownerComp,
                 sequence.blocks[0][0], target.instance, sequenceParGroups=sequence.blocks[0])
         state_action = next(action for action in direct_target.getActions() if action.id.endswith(":state_set"))
-        self.assertEqual(set(state_action.schema["items"]["properties"]), {"Value", "Selected", "Enabled"})
+        self.assertEqual(set(state_action.schema["items"]["properties"]),
+                         {"Value", "Selected", "Enabled", "Emit", "Clear"})
 
 
-    def test_tag_opt_out_and_event_only_sequences_do_not_create_state_pairs(self):
-        for kwargs in ({"tags": {"rship-no-properties"}}, {"members": [("Emit", "Pulse", None), ("Clear", "Momentary", None)]}):
-            with self.subTest(kwargs=kwargs):
-                self.frames.clear()
-                extension, _, _ = self.start(**kwargs)
-                self.assertEqual(set(self.client.emitterValueProviders), set())
-                actions = [e["item"] for e in self.events() if e["itemType"] == "Action"]
-                self.assertEqual({a["id"] for a in actions}, {"operator:Generator:set", "operator:Generator:resend"})
-                self.assertTrue(all("writesTo" not in action for action in actions))
+    def test_tag_opt_out_disables_state_pair(self):
+        extension, _, _ = self.start(tags={"rship-no-properties"})
+        self.assertEqual(set(self.client.emitterValueProviders), set())
+        actions = [e["item"] for e in self.events() if e["itemType"] == "Action"]
+        self.assertEqual({a["id"] for a in actions}, {"operator:Generator:set", "operator:Generator:resend"})
+
+    def test_event_only_sequence_creates_exec_tick_state_pair(self):
+        self.frames.clear()
+        extension, _, _ = self.start(members=[("Emit", "Pulse", None), ("Clear", "Momentary", None)])
+        self.assertEqual(set(self.client.emitterValueProviders), {"operator:Generator:state_updated"})
+        actions = [e["item"] for e in self.events() if e["itemType"] == "Action"]
+        self.assertEqual({a["id"] for a in actions},
+                         {"operator:Generator:set", "operator:Generator:resend", "operator:Generator:state_set"})
 
 
 if __name__ == "__main__":

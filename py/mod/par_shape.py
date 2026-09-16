@@ -1,6 +1,7 @@
 from abc import ABC, abstractmethod
 from copy import deepcopy
 from typing import Dict, List
+from uuid import UUID, uuid4
 
 from td import OP, ParGroup
 
@@ -14,6 +15,42 @@ SEQUENCE_VALUE_ENVELOPE_STYLES = frozenset({
     "StrMenu",
     "File",
 })
+
+NIL_EXEC_TICK_ID = "00000000-0000-0000-0000-000000000000"
+
+
+def makeExecTick(tickId: str = NIL_EXEC_TICK_ID) -> Dict[str, any]:
+    return {"id": tickId, "prev": None, "next": None}
+
+
+EXEC_TICK_SCHEMA = {
+    "type": "object",
+    "format": "exec-tick",
+    "properties": {
+        "id": {"type": "string", "format": "uuid"},
+        "prev": {},
+        "next": {},
+    },
+    "required": ["id", "prev", "next"],
+    "additionalProperties": False,
+}
+
+# A logical TouchDesigner parameter may be represented by separate action,
+# emitter, and property shape objects.  Tick identity belongs to the parameter,
+# not to any one of those transient wrappers.
+_EXEC_TICK_STATES = {}
+
+
+def _execTickState(ownerComp: OP, parGroup: ParGroup) -> Dict[str, any]:
+    # Keep the owner reference in the state so Python cannot recycle its id
+    # into an unrelated component while the registry entry is alive.
+    key = (id(ownerComp), parGroup.name)
+    return _EXEC_TICK_STATES.setdefault(key, {
+        "owner": ownerComp,
+        "tick": makeExecTick(),
+        "suppressNextLocalPulse": False,
+        "lastLocalPulseToken": None,
+    })
 
 
 class ParShape(ABC):
@@ -149,15 +186,45 @@ class PulseParShape(ParShape):
     def __init__(self, ownerComp: OP, parGroup: ParGroup):
         self.parGroup = parGroup
         self.ownerComp = ownerComp
+        self._state = _execTickState(ownerComp, parGroup)
 
     def buildData(self) -> Dict[str, any]:
-        return {"value": None}
+        return {"value": deepcopy(self._state["tick"])}
 
     def buildSchemaProperties(self) -> Dict[str, any]:
-        return {"value": {"type": "null"}}
+        return {"value": deepcopy(EXEC_TICK_SCHEMA)}
 
     def setData(self, data: Dict[str, any]):
+        tick = data.get("value") if isinstance(data, dict) else None
+        if not isinstance(tick, dict):
+            raise ValueError("ExecTick payload must be an object")
+        if set(tick) != {"id", "prev", "next"}:
+            raise ValueError("ExecTick payload must contain exactly id, prev, and next")
+        try:
+            tickId = str(UUID(tick["id"]))
+        except (AttributeError, TypeError, ValueError):
+            raise ValueError("ExecTick id must be a UUID")
+        if tickId == NIL_EXEC_TICK_ID or tickId == self._state["tick"]["id"]:
+            return
+        self._state["tick"] = deepcopy(tick)
+        self._state["tick"]["id"] = tickId
+        # TouchDesigner's onPulse callback also observes programmatic pulses.
+        # Preserve the incoming ID instead of minting a second local event for
+        # that callback.
+        self._state["suppressNextLocalPulse"] = True
         self.ownerComp.par[self.parGroup.name].pulse()
+
+    def markLocalPulse(self, parName: str = None, pulseToken: any = None):
+        if pulseToken is not None and self._state["lastLocalPulseToken"] is pulseToken:
+            return
+        self._state["lastLocalPulseToken"] = pulseToken
+        if self._state["suppressNextLocalPulse"]:
+            self._state["suppressNextLocalPulse"] = False
+            return
+        self._state["tick"] = makeExecTick(str(uuid4()))
+
+    def restoreTick(self, tick: Dict[str, any]):
+        self._state["tick"] = deepcopy(tick)
 
 
 class WHParShape(ParShape):
@@ -549,8 +616,13 @@ class SequenceParShape(ParShape):
         self._blockCacheCount = -1
         self._blockMembers = []
         self._blockPulseMemberKeys = []
+        self._retainedPulseTicks = {}
 
     def _invalidateBlockCache(self):
+        for blockIndex, blockMembers in enumerate(self._blockMembers):
+            for blockParGroup, memberKey, blockShape in blockMembers:
+                if blockParGroup.style in ("Pulse", "Momentary"):
+                    self._retainedPulseTicks[(blockIndex, memberKey)] = blockShape.buildData()["value"]
         self._blockCacheSequenceName = None
         self._blockCacheCount = -1
         self._blockMembers = []
@@ -571,12 +643,10 @@ class SequenceParShape(ParShape):
         # Iterating a TouchDesigner SequenceBlock creates ParGroup/PageList
         # proxy objects.  Materialize those proxies once per sequence shape and
         # reuse them until the number of blocks changes.
-        for block in sequence.blocks:
+        for blockIndex, block in enumerate(sequence.blocks):
             members = []
             pulseMemberKeys = []
             for blockParGroup in block:
-                if self.stateOnly and blockParGroup.style in ("Pulse", "Momentary"):
-                    continue
                 try:
                     blockShape = buildShape(self.ownerComp, blockParGroup)
                 except ValueError as e:
@@ -586,6 +656,9 @@ class SequenceParShape(ParShape):
                     continue
 
                 memberKey = self._getSequenceMemberKey(blockParGroup)
+                retainedTick = self._retainedPulseTicks.get((blockIndex, memberKey))
+                if retainedTick is not None and blockParGroup.style in ("Pulse", "Momentary"):
+                    blockShape.restoreTick(retainedTick)
                 members.append((blockParGroup, memberKey, blockShape))
                 if blockParGroup.style in ("Pulse", "Momentary"):
                     pulseMemberKeys.append(memberKey)
@@ -657,6 +730,8 @@ class SequenceParShape(ParShape):
             parGroup.style in SEQUENCE_VALUE_ENVELOPE_STYLES
             or (parGroup.style in ("Float", "Int") and parGroup.size == 1)
         )
+        if parGroup.style in ("Pulse", "Momentary"):
+            return {"value": value}
         if usesValueEnvelope and not isinstance(value, dict):
             return {"value": value}
         return value
@@ -673,9 +748,23 @@ class SequenceParShape(ParShape):
         if blockIndex >= len(self._blockPulseMemberKeys):
             return False
         return any(
-            bool(blockData.get(memberKey, False))
+            isinstance(blockData.get(memberKey), dict)
+            and blockData[memberKey].get("id") != NIL_EXEC_TICK_ID
             for memberKey in self._blockPulseMemberKeys[blockIndex]
         )
+
+    def markLocalPulse(self, parName: str = None, pulseToken: any = None):
+        sequence = self.parGroup.sequence
+        if sequence is None:
+            return
+        self._ensureBlockCache(sequence)
+        for blockMembers in self._blockMembers:
+            for blockParGroup, _, blockShape in blockMembers:
+                if (
+                    blockParGroup.style in ("Pulse", "Momentary")
+                    and (parName is None or blockParGroup.name == parName)
+                ):
+                    blockShape.markLocalPulse(pulseToken=pulseToken)
 
     def buildData(self) -> List[Dict[str, any]]:
         items = []
@@ -703,8 +792,6 @@ class SequenceParShape(ParShape):
         seenParGroups = set()
 
         for blockParGroup in self._getSchemaParGroups():
-            if self.stateOnly and blockParGroup.style in ("Pulse", "Momentary"):
-                continue
             memberKey = self._getSequenceMemberKey(blockParGroup)
             if memberKey in seenParGroups:
                 continue
@@ -763,12 +850,7 @@ class SequenceParShape(ParShape):
                 blockValue = blockData.get(memberKey, None)
                 if blockValue is None:
                     continue
-                isActivePulse = (
-                    blockParGroup.style in ("Pulse", "Momentary")
-                    and bool(blockValue)
-                )
-                if blockParGroup.style in ("Pulse", "Momentary") and not blockValue:
-                    continue
+                isActivePulse = blockParGroup.style in ("Pulse", "Momentary")
                 if not isActivePulse:
                     # Parameters can be changed by TouchDesigner scene recalls,
                     # expressions, exports, or scripts without going through

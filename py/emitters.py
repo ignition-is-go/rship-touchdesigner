@@ -41,6 +41,7 @@ def onPulse(par):
 		par.owner,
 		_getEmitterParGroupName(par.parGroup),
 		preserveDuplicate=True,
+		eventParName=par.parGroup.name,
 	)
 	return
 

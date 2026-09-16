@@ -717,14 +717,20 @@ class RshipExt:
 			raise RuntimeError("Connection changed during registration")
 
 
-	def PulseEmitter(self, opPath: str, parName: str, preserveDuplicate: bool = False):
+	def PulseEmitter(self, opPath: str, parName: str, preserveDuplicate: bool = False, eventParName: str = None):
 		changeKey = makeEmitterChangeKey(opPath, parName)
+		pulseToken = object()
 
 		emitters = self.emitterIndex.get(changeKey, ())
 		for emitter in emitters:
 			handler = self.emitterHandlers.get(emitter.id)
 			if handler is None:
 				continue
+			if eventParName is not None:
+				shape = getattr(handler, '__self__', None)
+				markLocalPulse = getattr(shape, 'markLocalPulse', None)
+				if markLocalPulse is not None:
+					markLocalPulse(eventParName, pulseToken=pulseToken)
 			data = handler()
 			if data is None:
 				continue

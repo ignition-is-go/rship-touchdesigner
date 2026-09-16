@@ -3,6 +3,7 @@ from pathlib import Path
 import sys
 import types
 import unittest
+from uuid import UUID
 
 
 TD_STUB = types.ModuleType("td")
@@ -208,24 +209,25 @@ class SequenceParShapeTests(unittest.TestCase):
             [{"value": "desired"}, {"value": "desired"}],
         )
 
-    def test_repeated_true_pulse_is_not_suppressed_by_cache(self):
+    def test_repeated_exec_tick_is_forwarded_to_member_shape_for_id_filtering(self):
         member = FakeParGroup("Pulse", name="Trigger")
         sequence = FakeSequence(num_blocks=1, blocks=[[member]])
         sequence_group = FakeSequenceParGroup(sequence)
         shape = PAR_SHAPE.SequenceParShape(ownerComp=None, parGroup=sequence_group)
-        block_shape = FakeBlockShape(False)
+        block_shape = FakeBlockShape({"id": PAR_SHAPE.NIL_EXEC_TICK_ID, "prev": None, "next": None})
         original_build_shape = PAR_SHAPE.buildShape
         PAR_SHAPE.buildShape = lambda owner_comp, par_group: block_shape
 
         try:
-            shape.setData([{"Trigger": True}])
-            shape.setData([{"Trigger": True}])
+            tick = {"id": "68b4ab1a-f242-4b9c-8363-252dc1042898", "prev": None, "next": None}
+            shape.setData([{"Trigger": tick}])
+            shape.setData([{"Trigger": tick}])
         finally:
             PAR_SHAPE.buildShape = original_build_shape
 
         self.assertEqual(
             block_shape.set_calls,
-            [{"value": True}, {"value": True}],
+            [{"value": tick}, {"value": tick}],
         )
 
     def test_repeated_sets_do_not_reiterate_touchdesigner_block(self):
@@ -265,7 +267,7 @@ class SequenceParShapeTests(unittest.TestCase):
 
         self.assertEqual(block.iterations, 1)
 
-    def test_generator_emit_and_clear_pulses_are_never_coalesced(self):
+    def test_generator_emit_and_clear_exec_ticks_are_forwarded_independently(self):
         emit = FakeParGroup("Pulse", name="Emit")
         clear = FakeParGroup("Pulse", name="Clear")
         block = CountingBlock([emit, clear])
@@ -273,29 +275,87 @@ class SequenceParShapeTests(unittest.TestCase):
         sequence_group = FakeSequenceParGroup(sequence)
         shape = PAR_SHAPE.SequenceParShape(ownerComp=None, parGroup=sequence_group)
         shapes = {
-            "Emit": FakeBlockShape(False),
-            "Clear": FakeBlockShape(False),
+            "Emit": FakeBlockShape({"id": PAR_SHAPE.NIL_EXEC_TICK_ID, "prev": None, "next": None}),
+            "Clear": FakeBlockShape({"id": PAR_SHAPE.NIL_EXEC_TICK_ID, "prev": None, "next": None}),
         }
         original_build_shape = PAR_SHAPE.buildShape
         PAR_SHAPE.buildShape = lambda owner_comp, par_group: shapes[par_group.name]
 
         try:
-            shape.setData([{"Emit": True, "Clear": False}])
-            shape.setData([{"Emit": True, "Clear": False}])
-            shape.setData([{"Emit": False, "Clear": True}])
-            shape.setData([{"Emit": False, "Clear": True}])
+            emit = {"id": "00000000-0000-4000-8000-000000000001", "prev": None, "next": None}
+            clear = {"id": "00000000-0000-4000-8000-000000000002", "prev": None, "next": None}
+            shape.setData([{"Emit": emit}])
+            shape.setData([{"Clear": clear}])
         finally:
             PAR_SHAPE.buildShape = original_build_shape
 
         self.assertEqual(
             shapes["Emit"].set_calls,
-            [{"value": True}, {"value": True}],
+            [{"value": emit}],
         )
         self.assertEqual(
             shapes["Clear"].set_calls,
-            [{"value": True}, {"value": True}],
+            [{"value": clear}],
         )
         self.assertEqual(block.iterations, 1)
+
+    def test_exec_tick_schema_and_repeated_id_do_not_replay_pulse(self):
+        member = FakeParGroup("Pulse", name="Trigger")
+        sequence = FakeSequence(num_blocks=1, blocks=[[member]])
+        shape = PAR_SHAPE.SequenceParShape(None, FakeSequenceParGroup(sequence), sequenceParGroups=[member])
+        pulse = type("Pulse", (), {"pulses": 0, "pulse": lambda self: setattr(self, "pulses", self.pulses + 1)})()
+        pulse_shape = PAR_SHAPE.PulseParShape(None, member)
+        pulse_shape.ownerComp = type("Owner", (), {"par": {"Trigger": pulse}})()
+        original_build_shape = PAR_SHAPE.buildShape
+        PAR_SHAPE.buildShape = lambda owner_comp, par_group: pulse_shape
+        tick = {"id": "68b4ab1a-f242-4b9c-8363-252dc1042898", "prev": None, "next": None}
+        try:
+            schema = shape.buildSchemaProperties()["items"]["properties"]["Trigger"]
+            self.assertEqual(schema["format"], "exec-tick")
+            shape.setData([{"Trigger": tick}])
+            first = pulse_shape.buildData()
+            shape.setData([{"Trigger": tick}])
+        finally:
+            PAR_SHAPE.buildShape = original_build_shape
+        self.assertEqual(first["value"], tick)
+        self.assertEqual(pulse.pulses, 1)
+
+    def test_local_sequence_pulse_mints_uuid_and_retains_it(self):
+        member = FakeParGroup("Pulse", name="Trigger")
+        sequence = FakeSequence(num_blocks=1, blocks=[[member]])
+        shape = PAR_SHAPE.SequenceParShape(None, FakeSequenceParGroup(sequence))
+        shape.markLocalPulse("Trigger")
+        first = shape.buildData()[0]["Trigger"]
+        second = shape.buildData()[0]["Trigger"]
+        self.assertNotEqual(first["id"], PAR_SHAPE.NIL_EXEC_TICK_ID)
+        self.assertEqual(UUID(first["id"]).version, 4)
+        self.assertEqual(second, first)
+
+    def test_programmatic_pulse_callback_preserves_incoming_tick_id(self):
+        member = FakeParGroup("Pulse", name="Trigger")
+        pulse = type("Pulse", (), {"pulses": 0, "pulse": lambda self: setattr(self, "pulses", self.pulses + 1)})()
+        owner = type("Owner", (), {"par": {"Trigger": pulse}})()
+        shape = PAR_SHAPE.PulseParShape(owner, member)
+        tick = {"id": "68b4ab1a-f242-4b9c-8363-252dc1042898", "prev": {"x": 1}, "next": {"x": 2}}
+
+        shape.setData({"value": tick})
+        shape.markLocalPulse(pulseToken=object())
+        shape.setData({"value": tick})
+
+        self.assertEqual(pulse.pulses, 1)
+        self.assertEqual(shape.buildData()["value"], tick)
+
+    def test_action_and_state_shapes_share_sequence_tick_identity(self):
+        member = FakeParGroup("Pulse", name="Trigger")
+        sequence = FakeSequence(num_blocks=1, blocks=[[member]])
+        action_shape = PAR_SHAPE.SequenceParShape(None, FakeSequenceParGroup(sequence))
+        state_shape = PAR_SHAPE.SequenceParShape(None, FakeSequenceParGroup(sequence))
+        token = object()
+
+        action_shape.markLocalPulse("Trigger", pulseToken=token)
+        state_shape.markLocalPulse("Trigger", pulseToken=token)
+
+        self.assertEqual(action_shape.buildData(), state_shape.buildData())
 
     def test_invalid_later_block_does_not_resize_sequence(self):
         sequence = FakeSequence(num_blocks=1, blocks=[[]])

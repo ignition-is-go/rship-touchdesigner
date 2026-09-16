@@ -325,10 +325,13 @@ class PropertyLoadingTests(unittest.TestCase):
                 self.assertTrue(all("writesTo" not in a for a in actions))
                 self.assertFalse(any(e["itemType"] == "Pulse" for e in self.events()))
                 self.assertEqual(self.client.emitterValueProviders, {})
-                message = self.command("ExecTargetAction", {"tx": "same", "action": {"id": target.id + ":set", "targetId": target.id}, "data": {"value": None}})
+                tick = {"id": "68b4ab1a-f242-4b9c-8363-252dc1042898", "prev": None, "next": None}
+                message = self.command("ExecTargetAction", {"tx": "same", "action": {"id": target.id + ":set", "targetId": target.id}, "data": {"value": tick}})
                 extension.OnRshipReceiveText(message)
                 extension.OnRshipReceiveText(message)
-                self.assertEqual(target.ownerComp.par["Emit"].pulses, 2)
+                self.assertEqual(target.ownerComp.par["Emit"].pulses, 1)
+                schema = actions[0]["schema"]["properties"]["value"]
+                self.assertEqual(schema["format"], "exec-tick")
 
     def test_active_refresh_publishes_starting_before_a_failing_scan(self):
         extension, _ = self.make_extension()

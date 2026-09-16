@@ -64,7 +64,7 @@ A property setter publishes the parameter's actual value after assignment, inclu
 
 For chain scenes, select and elect the desired properties in Rship. The executor does not convert existing scenes or elect property nodes automatically.
 
-Sequences expose a writable `<sequence name> State` property containing an array of blocks. The array length sets the block count within TouchDesigner's limits, with at least one block. Empty arrays and arrays above a sequence's maximum are rejected before assignment. Each block contains its persistent parameter values. Pulse and Momentary members are omitted from the property schema, readback, and assignment, so reconciliation cannot replay Emit or Clear events. The existing sequence Set, Resend, and Bulk Set actions retain their payloads and event behavior.
+Sequences expose a writable `<sequence name> State` property containing an array of blocks. The array length sets the block count within TouchDesigner's limits, with at least one block. Empty arrays and arrays above a sequence's maximum are rejected before assignment. Each block contains its persistent parameter values, including Pulse and Momentary members represented by the canonical `format: "exec-tick"` object (`id`, `prev`, and `next`). Nil and previously handled IDs do not fire, so property reconciliation cannot replay Emit or Clear events. A real local TouchDesigner pulse creates a fresh UUIDv4 and the most recent ID is retained for snapshots, resends, and unrelated value updates.
 
 Ordinary controls on sequence-based operators also support properties. Add the `rship-no-properties` tag to an operator to disable writable pairing explicitly. Existing emitters remain registered, so the legacy server may still display them as read-only properties.
 
