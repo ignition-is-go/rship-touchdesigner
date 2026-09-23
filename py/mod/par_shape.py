@@ -638,8 +638,8 @@ class SequenceParShape(ParShape):
 
     def _invalidateBlockCache(self):
         for blockIndex, blockMembers in enumerate(self._blockMembers):
-            for blockParGroup, memberKey, blockShape in blockMembers:
-                if blockParGroup.style in ("Pulse", "Momentary"):
+            for _, memberKey, blockShape in blockMembers:
+                if memberKey in self._blockPulseMemberKeys[blockIndex]:
                     self._retainedPulseTicks[(blockIndex, memberKey)] = blockShape.buildData()["value"]
         self._blockCacheSequenceName = None
         self._blockCacheCount = -1
@@ -847,8 +847,9 @@ class SequenceParShape(ParShape):
         # Assigning numBlocks rebuilds TouchDesigner's sequential parameters.
         # Avoid that churn when an action only updates values in existing blocks.
         if sequence.numBlocks != len(data):
-            sequence.numBlocks = len(data)
+            # Removed blocks invalidate their Par proxies immediately on resize.
             self._invalidateBlockCache()
+            sequence.numBlocks = len(data)
         self._ensureBlockCache(sequence)
 
         for blockIndex, blockData in enumerate(data):

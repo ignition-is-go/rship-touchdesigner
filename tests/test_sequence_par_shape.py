@@ -92,6 +92,53 @@ class CountingBlock:
 
 
 class SequenceParShapeTests(unittest.TestCase):
+    def test_shrink_preserves_ticks_before_removed_parameters_are_invalid(self):
+        class Member:
+            name = "Trigger"
+
+            def __init__(self):
+                self.valid = True
+
+            @property
+            def style(self):
+                if not self.valid:
+                    raise RuntimeError("Invalid Par object.")
+                return "Pulse"
+
+        class Sequence(FakeSequence):
+            @FakeSequence.numBlocks.setter
+            def numBlocks(self, value):
+                for block in self.blocks[value:]:
+                    for member in block:
+                        member.valid = False
+                self.blocks = self.blocks[:value]
+                while len(self.blocks) < value:
+                    self.blocks.append([Member()])
+                self._num_blocks = value
+
+        tick = {"id": "68b4ab1a-f242-4b9c-8363-252dc1042898", "prev": None, "next": None}
+        sequence = Sequence(2, [[Member()], [Member()]])
+        shape = PAR_SHAPE.SequenceParShape(None, FakeSequenceParGroup(sequence))
+        other_shape = PAR_SHAPE.SequenceParShape(None, FakeSequenceParGroup(sequence))
+        original_build_shape = PAR_SHAPE.buildShape
+
+        def build_shape(owner, member):
+            block_shape = FakeBlockShape(tick)
+            block_shape.restoreTick = lambda value: setattr(block_shape, "current_value", value)
+            return block_shape
+
+        PAR_SHAPE.buildShape = build_shape
+        try:
+            shape.buildData()
+            other_shape.buildData()
+            shape.setData([{}])
+            self.assertEqual(shape.buildData(), [{"Trigger": tick}])
+            self.assertEqual(sequence.numBlocks, 1)
+            other_shape.setData([{}, {}])
+            self.assertEqual(other_shape.buildData(), [{"Trigger": tick}, {"Trigger": tick}])
+        finally:
+            PAR_SHAPE.buildShape = original_build_shape
+
     def test_menu_value_wrapping_does_not_read_menu_metadata(self):
         shape = PAR_SHAPE.SequenceParShape(ownerComp=None, parGroup=None)
         menu_group = FakeParGroup("Menu")
