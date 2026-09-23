@@ -195,5 +195,23 @@ class ReconciledPropertyTests(unittest.TestCase):
         self.assertEqual(self.writes, [7, 7, 7])
 
 
+class ReflectedTargetIdTests(unittest.TestCase):
+    def test_namespaces_sequence_when_legacy_id_collides_with_page(self):
+        self.assertEqual(
+            RSHIP_EXT.rship._sequence_target_id(
+                "root-id", "root-id:Sampler", "Sampler"
+            ),
+            "root-id:Sequence:Sampler",
+        )
+
+    def test_preserves_legacy_sequence_id_without_page_collision(self):
+        self.assertEqual(
+            RSHIP_EXT.rship._sequence_target_id(
+                "root-id", "root-id:Generators", "Generator"
+            ),
+            "root-id:Generator",
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

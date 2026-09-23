@@ -388,6 +388,19 @@ def _seq_change_keys(ownerComp, sequence) -> list:
     return list(dict.fromkeys(cks))
 
 
+def _sequence_target_id(root_id: str, parent_id: str, sequence_name: str) -> str:
+    """Preserve the legacy sequence id unless it collides with its page target.
+
+    Current main introduced the namespaced fallback before the reflector replaced
+    SequenceTarget. Keeping the same rule makes an existing project migrate without
+    changing any previously valid target id.
+    """
+    legacy_id = f"{root_id}:{sequence_name}"
+    if legacy_id == parent_id:
+        return f"{root_id}:Sequence:{sequence_name}"
+    return legacy_id
+
+
 def _bulk_entries(page, ownerComp, section_prefix=None) -> list:
     """Reproduce PageTarget.buildBulkSchemaEntries: ordered {path,label,section,schema} over a
     page's pars (a Header par sets the running section; a sequence -> its array schema; a par
@@ -510,36 +523,90 @@ def reflect_comp(ownerComp, instance) -> "TargetProxy":
                 seen_seq.add(seq.name)
                 seqPgs = [p for p in page.parGroups if getattr(p, "sequence", None) and p.sequence.name == seq.name]
                 try:
-                    sshape = SequenceParShape(
+                    valueShape = SequenceParShape(
+                        ownerComp,
+                        pg,
+                        sequenceParGroups=seqPgs,
+                    )
+                    stateShape = SequenceParShape(
                         ownerComp,
                         pg,
                         sequenceParGroups=seqPgs,
                         stateOnly=True,
                     )
-                    sschema = sshape.buildSchemaProperties()
-                    if not sschema["items"]["properties"]:
+                    valueSchema = valueShape.buildSchemaProperties()
+                    stateSchema = stateShape.buildSchemaProperties()
+                    if not valueSchema["items"]["properties"]:
                         continue
                 except Exception as e:
                     op.RS_LOG.Warning(f"[reflect_comp]: skipping sequence {seq.name}: {e}")
                     continue
-                sqNode = TargetProxy(ownerComp, seq.name, seq.name, "Sequence",
-                                     f"{uid}:{seq.name}", parent=pageNode, id_override=f"{uid}:{seq.name}")
-                eid = f"{uid}:{seq.name}:updated"
+                sequenceTargetId = _sequence_target_id(uid, pageNode.id, seq.name)
+                sqNode = TargetProxy(
+                    ownerComp,
+                    seq.name,
+                    seq.name,
+                    "Sequence",
+                    sequenceTargetId,
+                    parent=pageNode,
+                    id_override=sequenceTargetId,
+                )
+                changeKeys = _seq_change_keys(ownerComp, seq)
+                eid = f"{sequenceTargetId}:updated"
                 sqNode._emitters["updated"] = _Reg(
-                    seq.name, "updated", sschema, change_key=makeEmitterChangeKey(ownerComp, seq.name),
-                    change_keys=_seq_change_keys(ownerComp, seq), provider=sshape.buildData)
+                    f"{seq.name} Updated",
+                    "updated",
+                    valueSchema,
+                    change_key=makeEmitterChangeKey(ownerComp, seq.name),
+                    change_keys=changeKeys,
+                    provider=valueShape.buildData,
+                )
 
-                def _seqset(a, d, _s=sshape, _eid=eid):
+                stateEid = f"{sequenceTargetId}:state_updated"
+                if allow_properties:
+                    sqNode._emitters["state_updated"] = _Reg(
+                        f"{seq.name} State",
+                        "state_updated",
+                        stateSchema,
+                        change_key=makeEmitterChangeKey(ownerComp, seq.name),
+                        change_keys=changeKeys,
+                        provider=stateShape.buildData,
+                    )
+
+                def _seqset(a, d, _s=valueShape, _eid=eid):
                     _s.setData(d)
-                    CLIENT.pulseEmitter(_eid, _to_jsonable(_s.buildData()))   # sequence parexec is unreliable
+                    CLIENT.pulseEmitter(_eid, _to_jsonable(_s.buildData()))
                     return None
                 sqNode._actions.append(_Reg(
                     f"Set {seq.name}",
                     "set",
-                    sschema,
+                    valueSchema,
                     handler=_seqset,
                     writesTo=makeWriterRef(eid) if allow_properties else None,
                 ))
+
+                def _seqresend(a, d, _s=valueShape, _eid=eid):
+                    CLIENT.pulseEmitter(_eid, _to_jsonable(_s.buildData()))
+                    return None
+                sqNode._actions.append(_Reg(
+                    f"Resend {seq.name}",
+                    "resend",
+                    None,
+                    handler=_seqresend,
+                ))
+
+                if allow_properties:
+                    def _seqstateset(a, d, _s=stateShape, _eid=stateEid):
+                        _s.setData(d)
+                        CLIENT.pulseEmitter(_eid, _to_jsonable(_s.buildData()))
+                        return None
+                    sqNode._actions.append(_Reg(
+                        f"Set {seq.name} State",
+                        "state_set",
+                        stateSchema,
+                        handler=_seqstateset,
+                        writesTo=makeWriterRef(stateEid),
+                    ))
                 pageNode._children.append(sqNode)
                 continue
             try:                                                 # par group -> property
@@ -548,14 +615,19 @@ def reflect_comp(ownerComp, instance) -> "TargetProxy":
                 op.RS_LOG.Warning(f"[reflect_comp]: skipping {pg.name} ({pg.style}): {e}")
                 continue
             schema = {"type": "object", "properties": shape.buildSchemaProperties()}
+            isProperty = (
+                allow_properties
+                and pg.style not in ("Pulse", "Momentary", "Sequence")
+                and getattr(pg, "sequence", None) is None
+            )
             pgNode = TargetProxy(ownerComp, pg.name, pg.name, pg.style,
                                  f"{uid}:{pg.name}", parent=pageNode, id_override=f"{uid}:{pg.name}")
             pgNode._emitters["updated"] = _Reg(
-                pg.name, "updated", schema,
+                pg.name if isProperty else f"{pg.name} Updated", "updated", schema,
                 change_key=makeEmitterChangeKey(ownerComp, pg.name), provider=shape.buildData)
-            def _set_par(a, d, _s=shape, _eid=f"{uid}:{pg.name}:updated"):
+            def _set_par(a, d, _s=shape, _eid=f"{uid}:{pg.name}:updated", _isProperty=isProperty):
                 _s.setData(d)
-                if allow_properties:
+                if _isProperty:
                     CLIENT.pulseEmitter(_eid, _to_jsonable(_s.buildData()))
                 return None
 
@@ -563,7 +635,13 @@ def reflect_comp(ownerComp, instance) -> "TargetProxy":
                 f"Set {pg.name}", "set", schema,
                 handler=_set_par,
                 writesTo=(makeWriterRef(f"{uid}:{pg.name}:updated")
-                          if allow_properties else None)))
+                          if isProperty else None)))
+
+            def _resend_par(a, d, _s=shape, _eid=f"{uid}:{pg.name}:updated"):
+                CLIENT.pulseEmitter(_eid, _to_jsonable(_s.buildData()))
+                return None
+            pgNode._actions.append(_Reg(
+                f"Resend {pg.name}", "resend", None, handler=_resend_par))
             pageNode._children.append(pgNode)
         # page-level bulk_set (this page's pars)
         pageNode._actions.append(_bulk_reg(_bulk_entries(page, ownerComp), [page], ownerComp))
