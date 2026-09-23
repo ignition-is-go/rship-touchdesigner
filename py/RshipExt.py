@@ -22,7 +22,7 @@ import json
 
 from exec import CLIENT, Instance, InstanceStatus, Status, Action, Emitter, Pulse
 from target import TouchTarget
-from util import makeEmitterChangeKey
+from util import makeEmitterChangeKey, ensureUniqueTargetIds
 from connection import ConnectionManager, ConnState, RegistrationCoordinator
 import rship
 import comp_engine
@@ -533,6 +533,9 @@ class RshipExt:
 			oc = getattr(e, "ownerComp", None)
 			if oc is not None and oc.valid:
 				ce_owners.add(oc.path)
+		eligible = [o for o in ops if o is not None and o.valid and o.path not in ce_owners]
+		for owner, oldId, newId in ensureUniqueTargetIds(eligible, self.opTargets):
+			op.RS_LOG.Warning(f"[RshipExt]: Copied target {owner.path}: replaced duplicate id {oldId} with {newId}")
 		for o in ops:
 			if o is None or not o.valid:
 				continue
