@@ -795,50 +795,27 @@ class TargetProxy(TouchTarget):
     def sequence(self, sequence, *, name=None, short_id=None):
         """Expose a TD Sequence as an rship array PROPERTY: read = the blocks as a list of
         field-objects (the emitter watches the header + EVERY block par, so any block change
-        auto-pulses the whole array), write = set the block count + each field. Each field is
-        reflected via par_schema."""
+        auto-pulses the whole array), write = set the block count + each field. Pulse and
+        Momentary members use retained exec-tick values, just like reflected tag targets."""
         seq = sequence
         owner = seq.owner
         label = name or _humanize(seq.name)
         short = short_id or _slug(seq.name)
         self._monitor_ops.add(owner.path)
-        prefix = f"{seq.name}0"
-        fields = [
-            pg.name[len(prefix):]
-            for pg in seq.blockParGroups
-            if pg.name.startswith(prefix) and not par_schema.is_trigger(pg)
-        ]
-
-        def block_pg(i, field):
-            return owner.parGroup[f"{seq.name}{i}{field}"]
-
-        item_props = {f: par_schema.inline_schema(block_pg(0, f))
-                      for f in fields if block_pg(0, f) is not None}
-        schema = {
-            "type": "array",
-            "items": {"type": "object", "properties": item_props},
-            "minItems": 1,
-        }
-        maximum = getattr(seq, "maxBlocks", None)
-        if maximum is not None:
-            schema["maxItems"] = maximum
-
-        def read_blocks():
-            return [{f: par_schema.read(block_pg(i, f)) for f in fields if block_pg(i, f) is not None}
-                    for i in range(seq.numBlocks)]
+        header = owner.parGroup[seq.name]
+        shape = SequenceParShape(
+            owner,
+            header,
+            sequenceParGroups=list(seq.blockParGroups),
+            stateOnly=True,
+        )
+        schema = shape.buildSchemaProperties()
 
         def writer(action, data, _short=short):
-            validate_sequence_payload(data, seq, persistent=True)
-            if seq.numBlocks != len(data):
-                seq.numBlocks = len(data)
-            for i, bd in enumerate(data):
-                if isinstance(bd, dict):
-                    for f in fields:
-                        if f in bd and block_pg(i, f) is not None:
-                            par_schema.write(block_pg(i, f), bd[f])
+            shape.setData(data)
             eid = self._child_id(_short)
             if eid is not None:
-                CLIENT.pulseEmitter(eid, _to_jsonable(read_blocks()))
+                CLIENT.pulseEmitter(eid, _to_jsonable(shape.buildData()))
             return None
 
         cks = [makeEmitterChangeKey(owner, seq.name)] + \
@@ -846,7 +823,7 @@ class TargetProxy(TouchTarget):
         cks = list(dict.fromkeys(cks))                    # dedup, preserve order
         proxy = PropertyProxy(self, short)
         self._emitters[short] = _Reg(label, short, schema, change_key=cks[0], change_keys=cks,
-                                     provider=(lambda: _to_jsonable(read_blocks())))
+                                     provider=shape.buildData)
         self._actions.append(_Reg(f"Set {label}", f"{short}-set", schema, handler=writer,
                                   writesTo=makeWriterRef(f"__SELF__:{short}")))
         _mark_dirty()

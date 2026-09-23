@@ -774,9 +774,10 @@ class RshipExt:
 		CLIENT.resubscribeViews()
 
 
-	def PulseEmitter(self, opPath: str, parName: str, preserveDuplicate: bool = False):
+	def PulseEmitter(self, opPath: str, parName: str, preserveDuplicate: bool = False, eventParName: str = None):
 		CLIENT.setSend(self.websocketOp.sendText)
 		changeKey = makeEmitterChangeKey(opPath, parName)
+		pulseToken = object()
 
 		emitters = self.emitterIndex.get(changeKey, ())
 		if not emitters:
@@ -788,6 +789,11 @@ class RshipExt:
 			handler = self.emitterHandlers.get(emitter.id)
 			if handler is None:
 				continue
+			if eventParName is not None:
+				shape = getattr(handler, '__self__', None)
+				markLocalPulse = getattr(shape, 'markLocalPulse', None)
+				if markLocalPulse is not None:
+					markLocalPulse(eventParName, pulseToken=pulseToken)
 			data = handler()
 			if data is None:
 				continue

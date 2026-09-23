@@ -102,14 +102,16 @@ class SequenceStateTests(unittest.TestCase):
         self.assertEqual(sequence.numBlocks, 1)
         self.assertEqual(sequence.resize_calls, [])
 
-    def test_state_schema_and_readback_exclude_triggers(self):
+    def test_state_schema_and_readback_include_exec_ticks(self):
         shape, _ = make_shape(state_only=True)
 
         schema = shape.buildSchemaProperties()
         data = shape.buildData()
 
-        self.assertEqual(set(schema["items"]["properties"]), {"Value"})
-        self.assertEqual(data, [{"Value": 0.25}])
+        self.assertEqual(set(schema["items"]["properties"]), {"Value", "Emit"})
+        self.assertEqual(schema["items"]["properties"]["Emit"]["format"], "exec-tick")
+        self.assertEqual(data[0]["Value"], 0.25)
+        self.assertEqual(data[0]["Emit"]["id"], par_shape.NIL_EXEC_TICK_ID)
 
     def test_state_count_is_validated_before_resize(self):
         shape, sequence = make_shape(state_only=True, count=1, maximum=2)

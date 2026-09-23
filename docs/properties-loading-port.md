@@ -37,7 +37,7 @@ Every registration send checks the connection generation before and after the op
 
 ## Sequence state
 
-Both reflected and manual Python sequence properties validate the whole array before changing `numBlocks`. Persistent sequence state requires at least one block, respects `maxBlocks`, and omits Pulse and Momentary members. Those event parameters cannot be replayed by property reconciliation.
+Both reflected and manual Python sequence properties validate the whole array before changing `numBlocks`. Persistent sequence state requires at least one block and respects `maxBlocks`. Pulse and Momentary members use the canonical retained `exec-tick` value (`id`, `prev`, and `next`); nil and previously handled IDs do not fire, so reconciliation cannot replay an old event.
 
 ## Reconciled properties
 
