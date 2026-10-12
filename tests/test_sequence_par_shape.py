@@ -108,8 +108,6 @@ class SequenceParShapeTests(unittest.TestCase):
             FakeParGroup("Int"),
             FakeParGroup("Str"),
             FakeParGroup("Toggle"),
-            FakeParGroup("Pulse"),
-            FakeParGroup("Momentary"),
             FakeParGroup("Menu"),
             FakeParGroup("StrMenu"),
             FakeParGroup("File"),
@@ -227,7 +225,7 @@ class SequenceParShapeTests(unittest.TestCase):
 
         self.assertEqual(
             block_shape.set_calls,
-            [{"value": tick}, {"value": tick}],
+            [tick, tick],
         )
 
     def test_repeated_sets_do_not_reiterate_touchdesigner_block(self):
@@ -291,11 +289,11 @@ class SequenceParShapeTests(unittest.TestCase):
 
         self.assertEqual(
             shapes["Emit"].set_calls,
-            [{"value": emit}],
+            [emit],
         )
         self.assertEqual(
             shapes["Clear"].set_calls,
-            [{"value": clear}],
+            [clear],
         )
         self.assertEqual(block.iterations, 1)
 
@@ -317,7 +315,7 @@ class SequenceParShapeTests(unittest.TestCase):
             shape.setData([{"Trigger": tick}])
         finally:
             PAR_SHAPE.buildShape = original_build_shape
-        self.assertEqual(first["value"], tick)
+        self.assertEqual(first, tick)
         self.assertEqual(pulse.pulses, 1)
 
     def test_local_sequence_pulse_mints_uuid_and_retains_it(self):
@@ -338,12 +336,12 @@ class SequenceParShapeTests(unittest.TestCase):
         shape = PAR_SHAPE.PulseParShape(owner, member)
         tick = {"id": "68b4ab1a-f242-4b9c-8363-252dc1042898", "prev": {"x": 1}, "next": {"x": 2}}
 
-        shape.setData({"value": tick})
+        shape.setData(tick)
         shape.markLocalPulse(pulseToken=object())
-        shape.setData({"value": tick})
+        shape.setData(tick)
 
         self.assertEqual(pulse.pulses, 1)
-        self.assertEqual(shape.buildData()["value"], tick)
+        self.assertEqual(shape.buildData(), tick)
 
     def test_action_and_state_shapes_share_sequence_tick_identity(self):
         member = FakeParGroup("Pulse", name="Trigger")

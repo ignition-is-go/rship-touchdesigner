@@ -9,8 +9,6 @@ from td import OP, ParGroup
 SEQUENCE_VALUE_ENVELOPE_STYLES = frozenset({
     "Str",
     "Toggle",
-    "Pulse",
-    "Momentary",
     "Menu",
     "StrMenu",
     "File",
@@ -189,13 +187,13 @@ class PulseParShape(ParShape):
         self._state = _execTickState(ownerComp, parGroup)
 
     def buildData(self) -> Dict[str, any]:
-        return {"value": deepcopy(self._state["tick"])}
+        return deepcopy(self._state["tick"])
 
     def buildSchemaProperties(self) -> Dict[str, any]:
-        return {"value": deepcopy(EXEC_TICK_SCHEMA)}
+        return deepcopy(EXEC_TICK_SCHEMA)
 
     def setData(self, data: Dict[str, any]):
-        tick = data.get("value") if isinstance(data, dict) else None
+        tick = data
         if not isinstance(tick, dict):
             raise ValueError("ExecTick payload must be an object")
         if set(tick) != {"id", "prev", "next"}:
@@ -622,7 +620,7 @@ class SequenceParShape(ParShape):
         for blockIndex, blockMembers in enumerate(self._blockMembers):
             for blockParGroup, memberKey, blockShape in blockMembers:
                 if blockParGroup.style in ("Pulse", "Momentary"):
-                    self._retainedPulseTicks[(blockIndex, memberKey)] = blockShape.buildData()["value"]
+                    self._retainedPulseTicks[(blockIndex, memberKey)] = blockShape.buildData()
         self._blockCacheSequenceName = None
         self._blockCacheCount = -1
         self._blockMembers = []
@@ -731,12 +729,14 @@ class SequenceParShape(ParShape):
             or (parGroup.style in ("Float", "Int") and parGroup.size == 1)
         )
         if parGroup.style in ("Pulse", "Momentary"):
-            return {"value": value}
+            return value
         if usesValueEnvelope and not isinstance(value, dict):
             return {"value": value}
         return value
 
     def _unwrapSequenceMemberSchema(self, schemaProperties: Dict[str, any]):
+        if schemaProperties.get("format") == "exec-tick":
+            return schemaProperties
         if list(schemaProperties.keys()) == ["value"]:
             return schemaProperties["value"]
         return {

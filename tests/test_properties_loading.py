@@ -325,13 +325,23 @@ class PropertyLoadingTests(unittest.TestCase):
                 self.assertTrue(all("writesTo" not in a for a in actions))
                 self.assertFalse(any(e["itemType"] == "Pulse" for e in self.events()))
                 self.assertEqual(self.client.emitterValueProviders, {})
-                tick = {"id": "68b4ab1a-f242-4b9c-8363-252dc1042898", "prev": None, "next": None}
-                message = self.command("ExecTargetAction", {"tx": "same", "action": {"id": target.id + ":set", "targetId": target.id}, "data": {"value": tick}})
-                extension.OnRshipReceiveText(message)
-                extension.OnRshipReceiveText(message)
-                self.assertEqual(target.ownerComp.par["Emit"].pulses, 1)
-                schema = actions[0]["schema"]["properties"]["value"]
-                self.assertEqual(schema["format"], "exec-tick")
+                set_action = next(a for a in actions if a["id"].endswith(":set"))
+                self.assertIsNone(set_action["schema"])
+                emitter = target.getEmitters()[0]
+                self.assertEqual(emitter.schema["format"], "exec-tick")
+                self.assertNotIn("value", emitter.schema["properties"])
+                ticks = []
+                for tx in ("first", "second"):
+                    message = self.command("ExecTargetAction", {"tx": tx, "action": {"id": target.id + ":set", "targetId": target.id}, "data": None})
+                    extension.OnRshipReceiveText(message)
+                    ticks.append(emitter.handler())
+                self.assertEqual(target.ownerComp.par["Emit"].pulses, 2)
+                self.assertNotEqual(ticks[0]["id"], ticks[1]["id"])
+                self.assertEqual(set(ticks[1]), {"id", "prev", "next"})
+                self.frames.clear()
+                extension.OnRshipReceiveText(self.command("ExecTargetAction", {"tx": "invalid", "action": {"id": target.id + ":set", "targetId": target.id}, "data": "a"}))
+                self.assertEqual(target.ownerComp.par["Emit"].pulses, 2)
+                self.assertEqual(self.frames[-1]["event"], "ws:m:command-error")
 
     def test_active_refresh_publishes_starting_before_a_failing_scan(self):
         extension, _ = self.make_extension()

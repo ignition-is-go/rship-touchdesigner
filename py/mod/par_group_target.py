@@ -1,7 +1,8 @@
 from datetime import datetime, timezone
 from exec import Target, Action, Emitter, Instance, makeWriterRef
 from typing import Dict, List
-from par_shape import buildShape
+from par_shape import buildShape, makeExecTick
+from uuid import uuid4
 from target import TouchTarget
 from util import makeEmitterChangeKey
 from exec import CLIENT
@@ -52,8 +53,13 @@ class ParGroupTarget(TouchTarget):
             "properties": self.parShape.buildSchemaProperties()
         }
 
+        # Rship provides the GO exec pin separately. A null action schema
+        # registers a trigger without any editable data pins.
+        if self.parGroup.style in ("Pulse", "Momentary"):
+            schema = None
+
         def handleSetAction(action: Action, data: Dict[str, any]):
-            result = self.parShape.setData(data)
+            result = self.handleAction(action.id, data)
             if self.isProperty:
                 CLIENT.pulseEmitter(f"{self.id}:updated", self.parShape.buildData())
             return result
@@ -94,6 +100,9 @@ class ParGroupTarget(TouchTarget):
             "properties": self.parShape.buildSchemaProperties()
         }
 
+        if self.parGroup.style in ("Pulse", "Momentary"):
+            schema = self.parShape.buildSchemaProperties()
+
         setEmitter = Emitter(
             id=f"{self.id}:updated",
             name=self.parGroup.name if self.isProperty else f"{self.parGroup.name} Updated",
@@ -110,4 +119,8 @@ class ParGroupTarget(TouchTarget):
 
 
     def handleAction(self, actionId, data):
+        if self.parGroup.style in ("Pulse", "Momentary"):
+            if data is not None:
+                raise ValueError("Pulse action takes no data payload")
+            data = makeExecTick(str(uuid4()))
         return self.parShape.setData(data)
